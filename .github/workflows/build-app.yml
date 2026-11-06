@@ -387,7 +387,7 @@ jobs:
           public class MainActivity extends Activity {
               static final String HOST = "foxysoxy-tech.github.io";
               static final String SITE = "https://" + HOST + "/";
-              static final String FALLBACK_PAGE = "BraveTube2.5.html";
+              static final String FALLBACK_PAGE = "BraveTube2.6.html";
               static final String API_LIST = "https://api.github.com/repos/foxysoxy-tech/foxysoxy-tech.github.io/contents/";
               static final String ACTION_TOGGLE = "com.foxysoxy.bravetube.TOGGLE";
               static final int REQ_LOGIN = 11;
@@ -604,6 +604,7 @@ jobs:
                           playing = m.optBoolean("playing", false);
                           audioOnly = m.optBoolean("audio", false);
                           applyState();
+                          if (playing && !hasWindowFocus()) startBackground();
                           break;
                       case "open":
                           openExternal(m.optString("url", ""));
@@ -648,9 +649,7 @@ jobs:
                   } else {
                       getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   }
-                  if (inPip) {
-                      try { setPictureInPictureParams(pipParams()); } catch (Exception ignored) { }
-                  }
+                  try { setPictureInPictureParams(pipParams()); } catch (Exception ignored) { }
               }
 
               // ---------- Mini-Fenster (Bild-in-Bild) ----------
@@ -661,7 +660,16 @@ jobs:
                   PendingIntent pi = PendingIntent.getBroadcast(this, 1, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
                   String label = playing ? "Pause" : "Weiter";
                   actions.add(new RemoteAction(Icon.createWithResource(this, playing ? R.drawable.ic_pause : R.drawable.ic_play), label, label, pi));
-                  return new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).setActions(actions).build();
+                  PictureInPictureParams.Builder b = new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).setActions(actions);
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      // Android 12+: Mini-Fenster öffnet sich von selbst beim Verlassen der App, solange ein Video läuft.
+                      try {
+                          boolean auto = playing && !audioOnly && fullscreenView == null;
+                          PictureInPictureParams.Builder.class.getMethod("setAutoEnterEnabled", boolean.class).invoke(b, auto);
+                          PictureInPictureParams.Builder.class.getMethod("setSeamlessResizeEnabled", boolean.class).invoke(b, false);
+                      } catch (Exception ignored) { }
+                  }
+                  return b.build();
               }
 
               private void enterPip(boolean announce) {
@@ -672,7 +680,7 @@ jobs:
                   try {
                       enterPictureInPictureMode(pipParams());
                   } catch (Exception e) {
-                      if (announce) toast("Mini-Fenster konnte nicht geöffnet werden.");
+                      if (announce) toast("Mini-Fenster nicht möglich. Android-Einstellungen → Apps → BraveTube → „Bild-im-Bild“ erlauben.");
                   }
               }
 
@@ -691,17 +699,40 @@ jobs:
 
               // ---------- Hintergrund ----------
 
+              private final Runnable keepAlive = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (web == null || !playing) return;
+                      // Die Seite soll auch bei verdecktem Fenster weiterlaufen (Ton und Video).
+                      try { web.onResume(); web.resumeTimers(); } catch (Exception ignored) { }
+                      ui.postDelayed(this, 1500);
+                  }
+              };
+
+              private void startBackground() {
+                  if (!playing) return;
+                  try { startForegroundService(new Intent(this, MediaService.class)); } catch (Exception ignored) { }
+                  ui.removeCallbacks(keepAlive);
+                  ui.postDelayed(keepAlive, 300);
+              }
+
               @Override
               protected void onPause() {
                   super.onPause();
-                  if (playing && !isInPictureInPictureMode()) {
-                      try { startForegroundService(new Intent(this, MediaService.class)); } catch (Exception ignored) { }
-                  }
+                  startBackground();
+              }
+
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  startBackground();
               }
 
               @Override
               protected void onResume() {
                   super.onResume();
+                  ui.removeCallbacks(keepAlive);
+                  try { web.onResume(); } catch (Exception ignored) { }
                   stopService(new Intent(this, MediaService.class));
               }
 
@@ -773,11 +804,14 @@ jobs:
           import android.content.Intent;
           import android.content.pm.ServiceInfo;
           import android.os.Build;
+          import android.graphics.drawable.Icon;
           import android.os.IBinder;
+          import android.os.PowerManager;
 
           /** Hält die App am Leben, solange im Hintergrund Ton läuft. */
           public class MediaService extends Service {
               private static final String CHANNEL = "playback";
+              private PowerManager.WakeLock wake;
 
               @Override
               public int onStartCommand(Intent intent, int flags, int startId) {
@@ -789,7 +823,21 @@ jobs:
                   }
                   Intent open = new Intent(this, MainActivity.class);
                   PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  PendingIntent toggle = PendingIntent.getBroadcast(this, 2,
+                          new Intent(MainActivity.ACTION_TOGGLE).setPackage(getPackageName()),
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  Notification.Action act = new Notification.Action.Builder(
+                          Icon.createWithResource(this, R.drawable.ic_pause), "Pause / Weiter", toggle).build();
+                  if (wake == null) {
+                      PowerManager pm = getSystemService(PowerManager.class);
+                      if (pm != null) {
+                          wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BraveTube:play");
+                          wake.setReferenceCounted(false);
+                          wake.acquire(4 * 60 * 60 * 1000L);
+                      }
+                  }
                   Notification n = new Notification.Builder(this, CHANNEL)
+                          .addAction(act)
                           .setSmallIcon(R.drawable.ic_play)
                           .setContentTitle("BraveTube")
                           .setContentText("Wiedergabe läuft im Hintergrund")
@@ -802,6 +850,13 @@ jobs:
                       startForeground(1, n);
                   }
                   return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  if (wake != null && wake.isHeld()) wake.release();
+                  wake = null;
+                  super.onDestroy();
               }
 
               @Override
@@ -823,6 +878,7 @@ jobs:
           import java.net.HttpURLConnection;
           import java.net.URL;
           import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
           import java.util.HashSet;
           import java.util.regex.Matcher;
           import java.util.regex.Pattern;
@@ -843,6 +899,8 @@ jobs:
                   try {
                       String url;
                       switch (kind) {
+                          case "home": url = "https://www.youtube.com/"; break;
+                          case "more": return fetchMore(arg, cookie);
                           case "history": url = "https://www.youtube.com/feed/history"; break;
                           case "wl": url = "https://www.youtube.com/playlist?list=WL"; break;
                           case "playlists": url = "https://www.youtube.com/feed/playlists"; break;
@@ -874,12 +932,115 @@ jobs:
 
                       JSONArray videos = new JSONArray();
                       JSONArray playlists = new JSONArray();
-                      walk(data, videos, playlists, new HashSet<>(), new HashSet<>(), 0);
+                      String[] next = new String[1];
+                      walk(data, videos, playlists, new HashSet<>(), new HashSet<>(), 0, next);
+                      remember(html);
 
+                      JSONObject res = new JSONObject();
+                      res.put("ok", true);
+                      if (next[0] != null) res.put("next", next[0]);
+                      res.put("videos", videos);
+                      res.put("playlists", playlists);
+                      res.put("at", System.currentTimeMillis());
+                      return res;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              // ---------- Weitere Videos nachladen (Fortsetzung) ----------
+              private static volatile String apiKey = "";
+              private static volatile String clientVersion = "";
+              private static volatile String visitorData = "";
+
+              private static String firstMatch(String html, String regex) {
+                  Matcher m = Pattern.compile(regex).matcher(html);
+                  return m.find() ? m.group(1) : "";
+              }
+
+              static void remember(String html) {
+                  String k = firstMatch(html, "\"INNERTUBE_API_KEY\":\"([^\"]+)\"");
+                  String v = firstMatch(html, "\"INNERTUBE_CONTEXT_CLIENT_VERSION\":\"([^\"]+)\"");
+                  String d = firstMatch(html, "\"VISITOR_DATA\":\"([^\"]+)\"");
+                  if (!k.isEmpty()) apiKey = k;
+                  if (!v.isEmpty()) clientVersion = v;
+                  if (!d.isEmpty()) visitorData = d;
+              }
+
+              private static String cookieValue(String cookie, String name) {
+                  for (String part : cookie.split(";")) {
+                      String p = part.trim();
+                      if (p.startsWith(name + "=")) return p.substring(name.length() + 1);
+                  }
+                  return "";
+              }
+
+              static String sapisidHash(String cookie) throws Exception {
+                  String sid = cookieValue(cookie, "SAPISID");
+                  if (sid.isEmpty()) sid = cookieValue(cookie, "__Secure-3PAPISID");
+                  if (sid.isEmpty()) return null;
+                  long ts = System.currentTimeMillis() / 1000;
+                  MessageDigest md = MessageDigest.getInstance("SHA-1");
+                  byte[] h = md.digest((ts + " " + sid + " https://www.youtube.com").getBytes(StandardCharsets.UTF_8));
+                  StringBuilder sb = new StringBuilder();
+                  for (byte b : h) sb.append(String.format("%02x", b));
+                  return "SAPISIDHASH " + ts + "_" + sb;
+              }
+
+              static JSONObject fetchMore(String token, String cookie) {
+                  try {
+                      if (token == null || token.length() < 10 || token.length() > 8000) return error("Ungültige Fortsetzung");
+                      if (cookie == null || !cookie.contains("SAPISID=")) return error("login");
+                      if (apiKey.isEmpty()) {
+                          // Konfiguration von der Startseite holen
+                          JSONObject first = fetch("home", "", cookie);
+                          if (first.has("error") && apiKey.isEmpty()) return first;
+                      }
+                      if (apiKey.isEmpty()) return error("YouTube-Konfiguration nicht gefunden");
+
+                      JSONObject client = new JSONObject();
+                      client.put("clientName", "WEB");
+                      client.put("clientVersion", clientVersion.isEmpty() ? "2.20250101.00.00" : clientVersion);
+                      client.put("hl", "de");
+                      client.put("gl", "DE");
+                      if (!visitorData.isEmpty()) client.put("visitorData", visitorData);
+                      JSONObject context = new JSONObject();
+                      context.put("client", client);
+                      JSONObject body = new JSONObject();
+                      body.put("context", context);
+                      body.put("continuation", token);
+
+                      HttpURLConnection c = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=" + apiKey).openConnection();
+                      c.setRequestMethod("POST");
+                      c.setDoOutput(true);
+                      c.setConnectTimeout(15000);
+                      c.setReadTimeout(20000);
+                      c.setRequestProperty("User-Agent", UA);
+                      c.setRequestProperty("Content-Type", "application/json");
+                      c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                      c.setRequestProperty("Origin", "https://www.youtube.com");
+                      c.setRequestProperty("X-Origin", "https://www.youtube.com");
+                      c.setRequestProperty("X-Goog-AuthUser", "0");
+                      c.setRequestProperty("X-Youtube-Client-Name", "1");
+                      c.setRequestProperty("X-Youtube-Client-Version", clientVersion);
+                      if (!visitorData.isEmpty()) c.setRequestProperty("X-Goog-Visitor-Id", visitorData);
+                      c.setRequestProperty("Cookie", cookie);
+                      String auth = sapisidHash(cookie);
+                      if (auth != null) c.setRequestProperty("Authorization", auth);
+                      c.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
+                      int code = c.getResponseCode();
+                      if (code >= 400) return error("YouTube antwortet nicht (HTTP " + code + ")");
+                      JSONObject data = new JSONObject(readAll(c.getInputStream()));
+
+                      JSONArray videos = new JSONArray();
+                      JSONArray playlists = new JSONArray();
+                      String[] next = new String[1];
+                      walk(data, videos, playlists, new HashSet<>(), new HashSet<>(), 0, next);
                       JSONObject res = new JSONObject();
                       res.put("ok", true);
                       res.put("videos", videos);
                       res.put("playlists", playlists);
+                      if (next[0] != null) res.put("next", next[0]);
                       res.put("at", System.currentTimeMillis());
                       return res;
                   } catch (Exception e) {
@@ -973,11 +1134,11 @@ jobs:
               }
 
               private static void walk(Object o, JSONArray videos, JSONArray playlists, HashSet<String> seenV,
-                                       HashSet<String> seenP, int depth) throws Exception {
+                                       HashSet<String> seenP, int depth, String[] next) throws Exception {
                   if (o == null || depth > 120) return;
                   if (o instanceof JSONArray) {
                       JSONArray a = (JSONArray) o;
-                      for (int i = 0; i < a.length(); i++) walk(a.opt(i), videos, playlists, seenV, seenP, depth + 1);
+                      for (int i = 0; i < a.length(); i++) walk(a.opt(i), videos, playlists, seenV, seenP, depth + 1, next);
                       return;
                   }
                   if (!(o instanceof JSONObject)) return;
@@ -1047,11 +1208,29 @@ jobs:
                       addPlaylist(playlists, seenP, pr.optString("playlistId", ""), text(pr.opt("title")), info);
                   }
 
+                  JSONObject cir = obj.optJSONObject("continuationItemRenderer");
+                  if (cir != null) {
+                      JSONObject ep = cir.optJSONObject("continuationEndpoint");
+                      JSONObject cc = ep == null ? null : ep.optJSONObject("continuationCommand");
+                      if (cc == null && ep != null) {
+                          JSONArray cmds = null;
+                          JSONObject ce = ep.optJSONObject("commandExecutorCommand");
+                          if (ce != null) cmds = ce.optJSONArray("commands");
+                          if (cmds != null) {
+                              for (int q = 0; q < cmds.length(); q++) {
+                                  JSONObject cmd = cmds.optJSONObject(q);
+                                  if (cmd != null && cmd.optJSONObject("continuationCommand") != null) cc = cmd.optJSONObject("continuationCommand");
+                              }
+                          }
+                      }
+                      if (cc != null && !cc.optString("token", "").isEmpty()) next[0] = cc.optString("token");
+                  }
+
                   java.util.Iterator<String> keys = obj.keys();
                   while (keys.hasNext()) {
                       String k = keys.next();
                       Object child = obj.opt(k);
-                      if (child instanceof JSONObject || child instanceof JSONArray) walk(child, videos, playlists, seenV, seenP, depth + 1);
+                      if (child instanceof JSONObject || child instanceof JSONArray) walk(child, videos, playlists, seenV, seenP, depth + 1, next);
                   }
               }
           }
