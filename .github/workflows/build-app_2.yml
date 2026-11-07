@@ -1,0 +1,1694 @@
+# BraveTube App – dieser Workflow baut die Android-App (APK) und legt sie als Release ab.
+# Neu bauen: Actions → "BraveTube App bauen" → "Run workflow".
+name: BraveTube App bauen
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository holen
+        uses: actions/checkout@v4
+
+      - name: Java einrichten
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android-SDK einrichten
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 platform-tools'
+
+      - name: Signierschlüssel anlegen (nur beim ersten Mal)
+        run: |
+          if [ ! -f app-signing/bravetube.jks ]; then
+            mkdir -p app-signing
+            keytool -genkeypair -v -keystore app-signing/bravetube.jks -storepass bravetube -keypass bravetube \
+              -alias bravetube -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=BraveTube, O=BraveTube, C=BG"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add app-signing/bravetube.jks
+            git commit -m "App-Signierschlüssel für BraveTube"
+            git push || (git pull --rebase && git push)
+          fi
+
+      - name: Projektdateien schreiben
+        run: |
+          mkdir -p "$(dirname 'android/app/build.gradle')"
+          cat > 'android/app/build.gradle' <<'BTEOF'
+          plugins { id 'com.android.application' }
+
+          def buildNo = (System.getenv('BT_BUILD') ?: '1').toInteger()
+
+          android {
+              namespace 'com.foxysoxy.bravetube'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.foxysoxy.bravetube'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode buildNo
+                  versionName "1.${buildNo}"
+              }
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv('BT_KEYSTORE') ?: '../../app-signing/bravetube.jks')
+                      storePassword 'bravetube'
+                      keyAlias 'bravetube'
+                      keyPassword 'bravetube'
+                  }
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.release
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.12.1'
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/AndroidManifest.xml')"
+          cat > 'android/app/src/main/AndroidManifest.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
+
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@mipmap/ic_launcher"
+                  android:allowBackup="true"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:supportsPictureInPicture="true"
+                      android:resizeableActivity="true"
+                      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".LoginActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden" />
+
+                  <service
+                      android:name=".MediaService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaPlayback" />
+              </application>
+          </manifest>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/assets/shim.js')"
+          cat > 'android/app/src/main/assets/shim.js' <<'BTEOF'
+          // Brücke zwischen der BraveTube-Seite und der App (läuft nur auf foxysoxy-tech.github.io)
+          (function () {
+            if (window.__btShim) return;
+            window.__btShim = true;
+
+            function native() { return window.BraveTubeNative; }
+
+            function post(obj) {
+              var n = native();
+              if (!n) return false;
+              try { n.postMessage(JSON.stringify(obj)); return true; } catch (e) { return false; }
+            }
+
+            function hook() {
+              var n = native();
+              if (!n || n.__btHooked) return;
+              n.__btHooked = true;
+              n.onmessage = function (e) {
+                var m;
+                try { m = JSON.parse(e.data); } catch (err) { return; }
+                if (!m) return;
+                if (m.id != null) window.postMessage({ bt: 'res', id: m.id, res: m.res }, '*');
+                else if (m.event) window.postMessage({ bt: 'event', event: m.event, on: m.on }, '*');
+              };
+            }
+
+            window.addEventListener('message', function (e) {
+              var d = e.data;
+              if (!d || typeof d !== 'object') return;
+              if (d.bt === 'req') {
+                if (d.kind === 'ping') { window.postMessage({ bt: 'res', id: d.id, res: { ok: true, v: 'app' } }, '*'); return; }
+                hook();
+                var ok = post({ id: d.id, kind: String(d.kind || ''), arg: d.arg == null ? '' : String(d.arg) });
+                if (!ok) window.postMessage({ bt: 'res', id: d.id, res: { error: 'App-Brücke nicht verfügbar' } }, '*');
+              } else if (d.bt === 'cmd') {
+                hook();
+                post(d);
+              }
+            });
+
+            function hello() { hook(); window.postMessage({ bt: 'ready', v: 'app' }, '*'); }
+            hello();
+            document.addEventListener('DOMContentLoaded', hello);
+            window.addEventListener('load', hello);
+          })();
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/assets/visibility.js')"
+          cat > 'android/app/src/main/assets/visibility.js' <<'BTEOF'
+          // Läuft in YouTube-Frames: lässt den Player glauben, die Seite sei sichtbar,
+          // damit die Wiedergabe im Hintergrund weiterläuft (wie "Hintergrundwiedergabe" in Brave).
+          (function () {
+            try {
+              Object.defineProperty(document, 'hidden', { get: function () { return false; }, configurable: true });
+              Object.defineProperty(document, 'visibilityState', { get: function () { return 'visible'; }, configurable: true });
+              Object.defineProperty(document, 'webkitHidden', { get: function () { return false; }, configurable: true });
+              Object.defineProperty(document, 'webkitVisibilityState', { get: function () { return 'visible'; }, configurable: true });
+            } catch (e) { }
+            var block = function (e) { e.stopImmediatePropagation(); };
+            window.addEventListener('visibilitychange', block, true);
+            document.addEventListener('visibilitychange', block, true);
+            window.addEventListener('webkitvisibilitychange', block, true);
+            document.addEventListener('webkitvisibilitychange', block, true);
+          })();
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/Assets.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/Assets.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import android.content.Context;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.nio.charset.StandardCharsets;
+
+          final class Assets {
+              private Assets() {}
+
+              static String read(Context c, String name) {
+                  try (InputStream in = c.getAssets().open(name)) {
+                      ByteArrayOutputStream out = new ByteArrayOutputStream();
+                      byte[] buf = new byte[8192];
+                      int n;
+                      while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                      return new String(out.toByteArray(), StandardCharsets.UTF_8);
+                  } catch (IOException e) {
+                      return "";
+                  }
+              }
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/LoginActivity.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/LoginActivity.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import android.app.Activity;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.ViewGroup;
+          import android.webkit.CookieManager;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          /** Einmalige Anmeldung bei YouTube. Die Cookies landen im gemeinsamen Cookie-Speicher der App. */
+          public class LoginActivity extends Activity {
+              private WebView web;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setStatusBarColor(0xFF111013);
+
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setBackgroundColor(0xFF111013);
+
+                  LinearLayout bar = new LinearLayout(this);
+                  bar.setOrientation(LinearLayout.HORIZONTAL);
+                  bar.setGravity(Gravity.CENTER_VERTICAL);
+                  int pad = (int) (12 * getResources().getDisplayMetrics().density);
+                  bar.setPadding(pad, pad, pad, pad);
+
+                  TextView title = new TextView(this);
+                  title.setText("Bei YouTube anmelden");
+                  title.setTextColor(Color.WHITE);
+                  title.setTextSize(17);
+                  title.setTypeface(null, Typeface.BOLD);
+                  bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  Button done = new Button(this);
+                  done.setText("Fertig");
+                  done.setOnClickListener(v -> finishWithResult());
+                  bar.addView(done, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  col.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  web = new WebView(this);
+                  col.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+                  setContentView(col);
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  // Google lehnt Anmeldungen in eingebetteten Ansichten ab; der Browser-Kennung werden deshalb die WebView-Merkmale genommen.
+                  String ua = s.getUserAgentString().replace("; wv", "").replaceAll("Version/[\\d.]+ ", "");
+                  s.setUserAgentString(ua);
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          if (url != null && url.contains("youtube.com/") && !url.contains("accounts.") && !url.contains("consent.") && loggedIn()) {
+                              finishWithResult();
+                          }
+                      }
+                  });
+
+                  web.loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&hl=de&continue="
+                          + Uri.encode("https://www.youtube.com/feed/history"));
+              }
+
+              static boolean loggedIn() {
+                  String c = CookieManager.getInstance().getCookie("https://www.youtube.com");
+                  return c != null && c.contains("SAPISID=");
+              }
+
+              private void finishWithResult() {
+                  CookieManager.getInstance().flush();
+                  setResult(loggedIn() ? RESULT_OK : RESULT_CANCELED);
+                  finish();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web != null && web.canGoBack()) web.goBack();
+                  else finishWithResult();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (web != null) web.destroy();
+                  super.onDestroy();
+              }
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/MainActivity.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/MainActivity.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.app.PictureInPictureParams;
+          import android.app.RemoteAction;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.content.SharedPreferences;
+          import android.content.pm.ActivityInfo;
+          import android.content.pm.PackageManager;
+          import android.content.res.Configuration;
+          import android.graphics.drawable.Icon;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.util.Rational;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import android.widget.Toast;
+
+          import androidx.webkit.JavaScriptReplyProxy;
+          import androidx.webkit.WebMessageCompat;
+          import androidx.webkit.WebViewCompat;
+          import androidx.webkit.WebViewFeature;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+
+          public class MainActivity extends Activity {
+              /** WebView, die nie als „verdeckt“ gemeldet wird: Ton und Video laufen auch bei gesperrtem Bildschirm weiter. */
+              static class BgWebView extends WebView {
+                  BgWebView(Context c) { super(c); }
+
+                  @Override
+                  protected void onWindowVisibilityChanged(int visibility) {
+                      if (visibility != View.GONE) super.onWindowVisibilityChanged(View.VISIBLE);
+                  }
+              }
+
+              static final String HOST = "foxysoxy-tech.github.io";
+              static final String SITE = "https://" + HOST + "/";
+              static final String FALLBACK_PAGE = "BraveTube2.7.html";
+              static final String API_LIST = "https://api.github.com/repos/foxysoxy-tech/foxysoxy-tech.github.io/contents/";
+              static final String ACTION_TOGGLE = "com.foxysoxy.bravetube.TOGGLE";
+              static final String ACTION_AUDIO = "com.foxysoxy.bravetube.AUDIO";
+              static final int REQ_LOGIN = 11;
+              static final int RECEIVER_NOT_EXPORTED_FLAG = 4;
+
+              private FrameLayout root;
+              private WebView web;
+              private View fullscreenView;
+              private WebChromeClient.CustomViewCallback fullscreenCallback;
+              private WebChromeClient chrome;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+              private final ExecutorService bg = Executors.newSingleThreadExecutor();
+              private JavaScriptReplyProxy proxy;
+              private boolean playing, audioOnly, inPip, bridgeOk, startScriptOk;
+              private BroadcastReceiver pipReceiver;
+              private BroadcastReceiver audioReceiver;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setStatusBarColor(0xFF111013);
+                  getWindow().setNavigationBarColor(0xFF1C1A1F);
+
+                  root = new FrameLayout(this);
+                  root.setBackgroundColor(0xFF111013);
+                  web = new BgWebView(this);
+                  root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  setContentView(root);
+                  setupWeb();
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
+                  }
+
+                  pipReceiver = new BroadcastReceiver() {
+                      @Override
+                      public void onReceive(Context context, Intent intent) {
+                          sendEvent("toggle", null);
+                      }
+                  };
+                  audioReceiver = new BroadcastReceiver() {
+                      @Override
+                      public void onReceive(Context context, Intent intent) {
+                          // Kopfhörer-Taste im Mini-Fenster: Nur Ton, Mini-Fenster schließen, im Hintergrund weiterhören.
+                          audioOnly = true;
+                          sendEvent("audio", true);
+                          moveTaskToBack(true);
+                      }
+                  };
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(pipReceiver, new IntentFilter(ACTION_TOGGLE), RECEIVER_NOT_EXPORTED_FLAG);
+                      registerReceiver(audioReceiver, new IntentFilter(ACTION_AUDIO), RECEIVER_NOT_EXPORTED_FLAG);
+                  } else {
+                      registerReceiver(pipReceiver, new IntentFilter(ACTION_TOGGLE));
+                      registerReceiver(audioReceiver, new IntentFilter(ACTION_AUDIO));
+                  }
+
+                  loadStart();
+              }
+
+              private void setupWeb() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setSupportMultipleWindows(false);
+                  s.setJavaScriptCanOpenWindowsAutomatically(false);
+                  s.setCacheMode(WebSettings.LOAD_DEFAULT);
+                  web.setBackgroundColor(0xFF111013);
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  // Damit der eingebettete Player das angemeldete Konto sieht und Videos im YouTube-Verlauf landen.
+                  cm.setAcceptThirdPartyCookies(web, true);
+
+                  HashSet<String> site = new HashSet<>(Arrays.asList("https://" + HOST));
+                  HashSet<String> yt = new HashSet<>(Arrays.asList("https://*.youtube.com", "https://*.youtube-nocookie.com"));
+
+                  if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                      WebViewCompat.addWebMessageListener(web, "BraveTubeNative", site, this::onBridgeMessage);
+                      bridgeOk = true;
+                  }
+                  if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                      startScriptOk = true;
+                      WebViewCompat.addDocumentStartJavaScript(web, Assets.read(this, "visibility.js"), yt);
+                      if (bridgeOk) WebViewCompat.addDocumentStartJavaScript(web, Assets.read(this, "shim.js"), site);
+                  }
+                  if (!bridgeOk) {
+                      toast("Bitte „Android System WebView“ im Play Store aktualisieren, damit Verlauf und Listen laden.");
+                  }
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          if (!request.isForMainFrame()) return false;
+                          Uri u = request.getUrl();
+                          String h = u.getHost();
+                          if (h != null && h.equalsIgnoreCase(HOST)) return false;
+                          openExternal(u.toString());
+                          return true;
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          if (bridgeOk && !startScriptOk && url != null && url.startsWith(SITE)) {
+                              view.evaluateJavascript(Assets.read(MainActivity.this, "shim.js"), null);
+                          }
+                      }
+                  });
+
+                  chrome = new WebChromeClient() {
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback callback) {
+                          if (fullscreenView != null) {
+                              callback.onCustomViewHidden();
+                              return;
+                          }
+                          fullscreenView = view;
+                          fullscreenCallback = callback;
+                          root.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                          web.setVisibility(View.GONE);
+                          getWindow().getDecorView().setSystemUiVisibility(
+                                  View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                      }
+
+                      @Override
+                      public void onHideCustomView() {
+                          if (fullscreenView == null) return;
+                          root.removeView(fullscreenView);
+                          fullscreenView = null;
+                          web.setVisibility(View.VISIBLE);
+                          getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                          if (fullscreenCallback != null) {
+                              fullscreenCallback.onCustomViewHidden();
+                              fullscreenCallback = null;
+                          }
+                      }
+                  };
+                  web.setWebChromeClient(chrome);
+              }
+
+              // ---------- Start: neueste BraveTubeX.Y.html aus dem Repository ----------
+
+              private void loadStart() {
+                  final SharedPreferences prefs = getSharedPreferences("bt", MODE_PRIVATE);
+                  final String last = prefs.getString("url", SITE + FALLBACK_PAGE);
+                  web.loadUrl(last);
+                  bg.execute(() -> {
+                      final String best = findNewest();
+                      if (best != null && !best.equals(last)) {
+                          prefs.edit().putString("url", best).apply();
+                          ui.post(() -> web.loadUrl(best));
+                      }
+                  });
+              }
+
+              private String findNewest() {
+                  try {
+                      HttpURLConnection c = (HttpURLConnection) new URL(API_LIST).openConnection();
+                      c.setConnectTimeout(8000);
+                      c.setReadTimeout(8000);
+                      c.setRequestProperty("Accept", "application/vnd.github+json");
+                      c.setRequestProperty("User-Agent", "BraveTube-App");
+                      if (c.getResponseCode() != 200) return null;
+                      JSONArray a = new JSONArray(YtFetcher.readAll(c.getInputStream()));
+                      Pattern pat = Pattern.compile("^BraveTube(\\d+)(?:\\.(\\d+))?\\.html$");
+                      String bestName = null;
+                      long bestScore = -1;
+                      for (int i = 0; i < a.length(); i++) {
+                          JSONObject f = a.optJSONObject(i);
+                          if (f == null) continue;
+                          Matcher m = pat.matcher(f.optString("name", ""));
+                          if (!m.matches()) continue;
+                          long score = Long.parseLong(m.group(1)) * 100000L + (m.group(2) != null ? Long.parseLong(m.group(2)) : 0);
+                          if (score > bestScore) {
+                              bestScore = score;
+                              bestName = f.optString("name", "");
+                          }
+                      }
+                      return bestName == null ? null : SITE + bestName;
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+
+              // ---------- Brücke zur Seite ----------
+
+              private void onBridgeMessage(WebView view, WebMessageCompat message, Uri sourceOrigin, boolean isMainFrame, JavaScriptReplyProxy replyProxy) {
+                  if (!isMainFrame) return;
+                  proxy = replyProxy;
+                  String data = message.getData();
+                  if (data == null) return;
+                  try {
+                      JSONObject m = new JSONObject(data);
+                      if (m.has("cmd")) {
+                          handleCmd(m);
+                          return;
+                      }
+                      final int id = m.getInt("id");
+                      final String kind = m.optString("kind", "");
+                      final String arg = m.optString("arg", "");
+                      final String cookie = CookieManager.getInstance().getCookie("https://www.youtube.com");
+                      bg.execute(() -> reply(id, YtFetcher.fetch(kind, arg, cookie)));
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              private void handleCmd(JSONObject m) {
+                  String cmd = m.optString("cmd", "");
+                  switch (cmd) {
+                      case "login":
+                          startActivityForResult(new Intent(this, LoginActivity.class), REQ_LOGIN);
+                          break;
+                      case "pip":
+                          enterPip(true);
+                          break;
+                      case "state":
+                          playing = m.optBoolean("playing", false);
+                          audioOnly = m.optBoolean("audio", false);
+                          MediaService.title = m.optString("title", "");
+                          applyState();
+                          if (playing && !hasWindowFocus()) startBackground();
+                          break;
+                      case "open":
+                          openExternal(m.optString("url", ""));
+                          break;
+                      default:
+                          break;
+                  }
+              }
+
+              private void reply(final int id, final JSONObject res) {
+                  ui.post(() -> {
+                      try {
+                          JSONObject o = new JSONObject();
+                          o.put("id", id);
+                          o.put("res", res);
+                          if (proxy != null) proxy.postMessage(o.toString());
+                      } catch (Exception ignored) {
+                      }
+                  });
+              }
+
+              private void sendEvent(final String event, final Boolean on) {
+                  ui.post(() -> {
+                      try {
+                          JSONObject o = new JSONObject();
+                          o.put("event", event);
+                          if (on != null) o.put("on", on.booleanValue());
+                          if (proxy != null) {
+                              proxy.postMessage(o.toString());
+                          } else {
+                              web.evaluateJavascript("window.postMessage({bt:'event',event:" + JSONObject.quote(event)
+                                      + ",on:" + (on != null && on) + "},'*')", null);
+                          }
+                      } catch (Exception ignored) {
+                      }
+                  });
+              }
+
+              private void applyState() {
+                  if (playing && !audioOnly) {
+                      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  } else {
+                      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  }
+                  try { setPictureInPictureParams(pipParams()); } catch (Exception ignored) { }
+              }
+
+              // ---------- Mini-Fenster (Bild-in-Bild) ----------
+
+              private PictureInPictureParams pipParams() {
+                  List<RemoteAction> actions = new ArrayList<>();
+                  Intent i = new Intent(ACTION_TOGGLE).setPackage(getPackageName());
+                  PendingIntent pi = PendingIntent.getBroadcast(this, 1, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  String label = playing ? "Pause" : "Weiter";
+                  actions.add(new RemoteAction(Icon.createWithResource(this, playing ? R.drawable.ic_pause : R.drawable.ic_play), label, label, pi));
+                  Intent ai = new Intent(ACTION_AUDIO).setPackage(getPackageName());
+                  PendingIntent api = PendingIntent.getBroadcast(this, 3, ai, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  actions.add(new RemoteAction(Icon.createWithResource(this, R.drawable.ic_headphones), "Nur Ton", "Nur Ton im Hintergrund", api));
+                  PictureInPictureParams.Builder b = new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).setActions(actions);
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      // Android 12+: Mini-Fenster öffnet sich von selbst beim Verlassen der App, solange ein Video läuft.
+                      try {
+                          boolean auto = playing && !audioOnly && fullscreenView == null;
+                          PictureInPictureParams.Builder.class.getMethod("setAutoEnterEnabled", boolean.class).invoke(b, auto);
+                          PictureInPictureParams.Builder.class.getMethod("setSeamlessResizeEnabled", boolean.class).invoke(b, false);
+                      } catch (Exception ignored) { }
+                  }
+                  return b.build();
+              }
+
+              private void enterPip(boolean announce) {
+                  if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                      if (announce) toast("Dieses Gerät unterstützt kein Mini-Fenster.");
+                      return;
+                  }
+                  try {
+                      enterPictureInPictureMode(pipParams());
+                  } catch (Exception e) {
+                      if (announce) toast("Mini-Fenster nicht möglich. Android-Einstellungen → Apps → BraveTube → „Bild-im-Bild“ erlauben.");
+                  }
+              }
+
+              @Override
+              public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+                  inPip = isInPictureInPictureMode;
+                  sendEvent("pip", isInPictureInPictureMode);
+              }
+
+              @Override
+              protected void onUserLeaveHint() {
+                  super.onUserLeaveHint();
+                  if (playing && !audioOnly && fullscreenView == null && !inPip) enterPip(false);
+              }
+
+              // ---------- Hintergrund ----------
+
+              private final Runnable keepAlive = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (web == null || !playing) return;
+                      // Die Seite soll auch bei verdecktem Fenster weiterlaufen (Ton und Video).
+                      try { web.onResume(); web.resumeTimers(); } catch (Exception ignored) { }
+                      ui.postDelayed(this, 1500);
+                  }
+              };
+
+              private void startBackground() {
+                  if (!playing) return;
+                  try { startForegroundService(new Intent(this, MediaService.class)); } catch (Exception ignored) { }
+                  ui.removeCallbacks(keepAlive);
+                  ui.postDelayed(keepAlive, 300);
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  startBackground();
+              }
+
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  startBackground();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  ui.removeCallbacks(keepAlive);
+                  try { web.onResume(); } catch (Exception ignored) { }
+                  stopService(new Intent(this, MediaService.class));
+              }
+
+              // ---------- Sonstiges ----------
+
+              private void openExternal(String url) {
+                  if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return;
+                  Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  try {
+                      startActivity(new Intent(i).setPackage("com.brave.browser"));
+                      return;
+                  } catch (Exception ignored) {
+                  }
+                  try {
+                      startActivity(i);
+                  } catch (Exception e) {
+                      toast("Kein Browser gefunden.");
+                  }
+              }
+
+              private void toast(String msg) {
+                  Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == REQ_LOGIN) {
+                      CookieManager.getInstance().flush();
+                      sendEvent("login", resultCode == RESULT_OK);
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (fullscreenView != null) {
+                      chrome.onHideCustomView();
+                      return;
+                  }
+                  if (web.canGoBack()) {
+                      web.goBack();
+                  } else if (playing) {
+                      moveTaskToBack(true);
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try { unregisterReceiver(pipReceiver); } catch (Exception ignored) { }
+                  try { unregisterReceiver(audioReceiver); } catch (Exception ignored) { }
+                  stopService(new Intent(this, MediaService.class));
+                  bg.shutdown();
+                  if (web != null) web.destroy();
+                  super.onDestroy();
+              }
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/MediaService.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/MediaService.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.graphics.drawable.Icon;
+          import android.media.MediaMetadata;
+          import android.media.session.MediaSession;
+          import android.media.session.PlaybackState;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          /** Hält die App am Leben, solange im Hintergrund Ton läuft. */
+          public class MediaService extends Service {
+              private static final String CHANNEL = "playback";
+              static volatile String title = "";
+              private PowerManager.WakeLock wake;
+              private MediaSession session;
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  NotificationManager nm = getSystemService(NotificationManager.class);
+                  if (nm != null) {
+                      NotificationChannel ch = new NotificationChannel(CHANNEL, "Wiedergabe", NotificationManager.IMPORTANCE_LOW);
+                      ch.setShowBadge(false);
+                      nm.createNotificationChannel(ch);
+                  }
+                  Intent open = new Intent(this, MainActivity.class);
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  PendingIntent toggle = PendingIntent.getBroadcast(this, 2,
+                          new Intent(MainActivity.ACTION_TOGGLE).setPackage(getPackageName()),
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  Notification.Action act = new Notification.Action.Builder(
+                          Icon.createWithResource(this, R.drawable.ic_pause), "Pause / Weiter", toggle).build();
+                  if (wake == null) {
+                      PowerManager pm = getSystemService(PowerManager.class);
+                      if (pm != null) {
+                          wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BraveTube:play");
+                          wake.setReferenceCounted(false);
+                          wake.acquire(4 * 60 * 60 * 1000L);
+                      }
+                  }
+                  if (session == null) {
+                      session = new MediaSession(this, "BraveTube");
+                      session.setCallback(new MediaSession.Callback() {
+                          @Override public void onPlay() { sendBroadcast(new Intent(MainActivity.ACTION_TOGGLE).setPackage(getPackageName())); }
+                          @Override public void onPause() { sendBroadcast(new Intent(MainActivity.ACTION_TOGGLE).setPackage(getPackageName())); }
+                      });
+                      session.setPlaybackState(new PlaybackState.Builder()
+                              .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE)
+                              .setState(PlaybackState.STATE_PLAYING, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f).build());
+                      session.setActive(true);
+                  }
+                  String t = title == null || title.isEmpty() ? "Wiedergabe läuft im Hintergrund" : title;
+                  session.setMetadata(new MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, t).putString(MediaMetadata.METADATA_KEY_ARTIST, "BraveTube").build());
+                  Notification n = new Notification.Builder(this, CHANNEL)
+                          .setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken()))
+                          .addAction(act)
+                          .setSmallIcon(R.drawable.ic_play)
+                          .setContentTitle("BraveTube")
+                          .setContentText(t)
+                          .setOngoing(true)
+                          .setContentIntent(pi)
+                          .build();
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                  } else {
+                      startForeground(1, n);
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  if (session != null) { try { session.setActive(false); session.release(); } catch (Exception ignored) { } session = null; }
+                  if (wake != null && wake.isHeld()) wake.release();
+                  wake = null;
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/YtFetcher.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/YtFetcher.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
+          import java.util.HashSet;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+
+          /** Lädt YouTube-Seiten mit den Cookies des angemeldeten Kontos und liest Videos und Playlists aus ytInitialData. */
+          final class YtFetcher {
+              private YtFetcher() {}
+
+              static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+              private static final Pattern PLAYLIST_ID = Pattern.compile("^[A-Za-z0-9_-]{2,64}$");
+              private static final Pattern DURATION = Pattern.compile("\"text\":\"(\\d{1,2}(?::\\d{2}){1,2})\"");
+              private static final String[] VIDEO_KEYS = {
+                      "videoRenderer", "playlistVideoRenderer", "compactVideoRenderer", "gridVideoRenderer",
+                      "videoWithContextRenderer", "playlistPanelVideoRenderer"};
+              private static final String[] PLAYLIST_KEYS = {"gridPlaylistRenderer", "playlistRenderer", "compactPlaylistRenderer"};
+
+              static JSONObject fetch(String kind, String arg, String cookie) {
+                  try {
+                      String url;
+                      switch (kind) {
+                          case "home": url = "https://www.youtube.com/"; break;
+                          case "more": return fetchMore(arg, cookie);
+                          case "state": return videoState(arg, cookie);
+                          case "comments": return commentsPage(arg, cookie);
+                          case "like": return doLike(arg, cookie);
+                          case "subscribe": return doSubscribe(arg, cookie);
+                          case "comment": return doComment(arg, cookie);
+                          case "history": url = "https://www.youtube.com/feed/history"; break;
+                          case "wl": url = "https://www.youtube.com/playlist?list=WL"; break;
+                          case "playlists": url = "https://www.youtube.com/feed/playlists"; break;
+                          case "playlist":
+                              if (arg == null || !PLAYLIST_ID.matcher(arg).matches()) return error("Ungültige Playlist");
+                              url = "https://www.youtube.com/playlist?list=" + arg;
+                              break;
+                          default: return error("Unbekannte Anfrage");
+                      }
+                      if (cookie == null || !cookie.contains("SAPISID=")) return error("login");
+
+                      HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setConnectTimeout(15000);
+                      c.setReadTimeout(20000);
+                      c.setInstanceFollowRedirects(true);
+                      c.setRequestProperty("User-Agent", UA);
+                      c.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+                      c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                      c.setRequestProperty("Cookie", cookie);
+                      int code = c.getResponseCode();
+                      String finalHost = c.getURL().getHost() == null ? "" : c.getURL().getHost();
+                      if (code >= 400) return error("YouTube antwortet nicht (HTTP " + code + ")");
+                      String html = readAll(c.getInputStream());
+                      if (finalHost.contains("consent.youtube.com") || finalHost.contains("accounts.google.com")) return error("login");
+                      if (html.contains("\"LOGGED_IN\":false")) return error("login");
+
+                      JSONObject data = extractInitialData(html);
+                      if (data == null) return error("YouTube-Seite konnte nicht gelesen werden");
+
+                      JSONArray videos = new JSONArray();
+                      JSONArray playlists = new JSONArray();
+                      String[] next = new String[1];
+                      walk(data, videos, playlists, new HashSet<>(), new HashSet<>(), 0, next);
+                      remember(html);
+
+                      JSONObject res = new JSONObject();
+                      res.put("ok", true);
+                      if (next[0] != null) res.put("next", next[0]);
+                      res.put("videos", videos);
+                      res.put("playlists", playlists);
+                      res.put("at", System.currentTimeMillis());
+                      return res;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              // ---------- Weitere Videos nachladen (Fortsetzung) ----------
+              private static volatile String apiKey = "";
+              private static volatile String clientVersion = "";
+              private static volatile String visitorData = "";
+
+              private static String firstMatch(String html, String regex) {
+                  Matcher m = Pattern.compile(regex).matcher(html);
+                  return m.find() ? m.group(1) : "";
+              }
+
+              static void remember(String html) {
+                  String k = firstMatch(html, "\"INNERTUBE_API_KEY\":\"([^\"]+)\"");
+                  String v = firstMatch(html, "\"INNERTUBE_CONTEXT_CLIENT_VERSION\":\"([^\"]+)\"");
+                  String d = firstMatch(html, "\"VISITOR_DATA\":\"([^\"]+)\"");
+                  if (!k.isEmpty()) apiKey = k;
+                  if (!v.isEmpty()) clientVersion = v;
+                  if (!d.isEmpty()) visitorData = d;
+              }
+
+              private static String cookieValue(String cookie, String name) {
+                  for (String part : cookie.split(";")) {
+                      String p = part.trim();
+                      if (p.startsWith(name + "=")) return p.substring(name.length() + 1);
+                  }
+                  return "";
+              }
+
+              static String sapisidHash(String cookie) throws Exception {
+                  String sid = cookieValue(cookie, "SAPISID");
+                  if (sid.isEmpty()) sid = cookieValue(cookie, "__Secure-3PAPISID");
+                  if (sid.isEmpty()) return null;
+                  long ts = System.currentTimeMillis() / 1000;
+                  MessageDigest md = MessageDigest.getInstance("SHA-1");
+                  byte[] h = md.digest((ts + " " + sid + " https://www.youtube.com").getBytes(StandardCharsets.UTF_8));
+                  StringBuilder sb = new StringBuilder();
+                  for (byte b : h) sb.append(String.format("%02x", b));
+                  return "SAPISIDHASH " + ts + "_" + sb;
+              }
+
+              static JSONObject fetchMore(String token, String cookie) {
+                  try {
+                      if (token == null || token.length() < 10 || token.length() > 8000) return error("Ungültige Fortsetzung");
+                      if (cookie == null || !cookie.contains("SAPISID=")) return error("login");
+                      loadConfig(cookie);
+                      if (apiKey.isEmpty()) return error("YouTube-Konfiguration nicht gefunden");
+
+                      JSONObject client = new JSONObject();
+                      client.put("clientName", "WEB");
+                      client.put("clientVersion", clientVersion.isEmpty() ? "2.20250101.00.00" : clientVersion);
+                      client.put("hl", "de");
+                      client.put("gl", "DE");
+                      if (!visitorData.isEmpty()) client.put("visitorData", visitorData);
+                      JSONObject context = new JSONObject();
+                      context.put("client", client);
+                      JSONObject body = new JSONObject();
+                      body.put("context", context);
+                      body.put("continuation", token);
+
+                      HttpURLConnection c = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false&key=" + apiKey).openConnection();
+                      c.setRequestMethod("POST");
+                      c.setDoOutput(true);
+                      c.setConnectTimeout(15000);
+                      c.setReadTimeout(20000);
+                      c.setRequestProperty("User-Agent", UA);
+                      c.setRequestProperty("Content-Type", "application/json");
+                      c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                      c.setRequestProperty("Origin", "https://www.youtube.com");
+                      c.setRequestProperty("X-Origin", "https://www.youtube.com");
+                      c.setRequestProperty("X-Goog-AuthUser", "0");
+                      c.setRequestProperty("X-Youtube-Client-Name", "1");
+                      c.setRequestProperty("X-Youtube-Client-Version", clientVersion);
+                      if (!visitorData.isEmpty()) c.setRequestProperty("X-Goog-Visitor-Id", visitorData);
+                      c.setRequestProperty("Cookie", cookie);
+                      String auth = sapisidHash(cookie);
+                      if (auth != null) c.setRequestProperty("Authorization", auth);
+                      c.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
+                      int code = c.getResponseCode();
+                      if (code >= 400) return error("YouTube antwortet nicht (HTTP " + code + ")");
+                      JSONObject data = new JSONObject(readAll(c.getInputStream()));
+
+                      JSONArray videos = new JSONArray();
+                      JSONArray playlists = new JSONArray();
+                      String[] next = new String[1];
+                      walk(data, videos, playlists, new HashSet<>(), new HashSet<>(), 0, next);
+                      JSONObject res = new JSONObject();
+                      res.put("ok", true);
+                      res.put("videos", videos);
+                      res.put("playlists", playlists);
+                      if (next[0] != null) res.put("next", next[0]);
+                      res.put("at", System.currentTimeMillis());
+                      return res;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              // ---------- Video-Funktionen mit Konto: Status, Kommentare, Like, Abonnieren ----------
+              static void loadConfig(String cookie) throws Exception {
+                  if (!apiKey.isEmpty()) return;
+                  HttpURLConnection c = (HttpURLConnection) new URL("https://www.youtube.com/").openConnection();
+                  c.setConnectTimeout(15000);
+                  c.setReadTimeout(20000);
+                  c.setRequestProperty("User-Agent", UA);
+                  c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                  c.setRequestProperty("Cookie", cookie);
+                  remember(readAll(c.getInputStream()));
+              }
+
+              private static JSONObject baseBody() throws Exception {
+                  JSONObject client = new JSONObject();
+                  client.put("clientName", "WEB");
+                  client.put("clientVersion", clientVersion.isEmpty() ? "2.20250101.00.00" : clientVersion);
+                  client.put("hl", "de");
+                  client.put("gl", "DE");
+                  if (!visitorData.isEmpty()) client.put("visitorData", visitorData);
+                  JSONObject context = new JSONObject();
+                  context.put("client", client);
+                  JSONObject body = new JSONObject();
+                  body.put("context", context);
+                  return body;
+              }
+
+              static String postRaw(String endpoint, JSONObject body, String cookie) throws Exception {
+                  loadConfig(cookie);
+                  if (apiKey.isEmpty()) throw new Exception("YouTube-Konfiguration nicht gefunden");
+                  HttpURLConnection c = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/" + endpoint + "?prettyPrint=false&key=" + apiKey).openConnection();
+                  c.setRequestMethod("POST");
+                  c.setDoOutput(true);
+                  c.setConnectTimeout(15000);
+                  c.setReadTimeout(25000);
+                  c.setRequestProperty("User-Agent", UA);
+                  c.setRequestProperty("Content-Type", "application/json");
+                  c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                  c.setRequestProperty("Origin", "https://www.youtube.com");
+                  c.setRequestProperty("X-Origin", "https://www.youtube.com");
+                  c.setRequestProperty("X-Goog-AuthUser", "0");
+                  c.setRequestProperty("X-Youtube-Client-Name", "1");
+                  c.setRequestProperty("X-Youtube-Client-Version", clientVersion);
+                  if (!visitorData.isEmpty()) c.setRequestProperty("X-Goog-Visitor-Id", visitorData);
+                  c.setRequestProperty("Cookie", cookie);
+                  String auth = sapisidHash(cookie);
+                  if (auth != null) c.setRequestProperty("Authorization", auth);
+                  c.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
+                  int code = c.getResponseCode();
+                  if (code >= 400) throw new Exception("YouTube antwortet nicht (HTTP " + code + ")");
+                  return readAll(c.getInputStream());
+              }
+
+              private static boolean loggedOut(String cookie) {
+                  return cookie == null || !cookie.contains("SAPISID=");
+              }
+
+              static Object findFirst(Object o, String key, int depth) {
+                  if (o == null || depth > 80) return null;
+                  if (o instanceof JSONObject) {
+                      JSONObject j = (JSONObject) o;
+                      if (j.has(key)) return j.opt(key);
+                      java.util.Iterator<String> it = j.keys();
+                      while (it.hasNext()) {
+                          Object r = findFirst(j.opt(it.next()), key, depth + 1);
+                          if (r != null) return r;
+                      }
+                  } else if (o instanceof JSONArray) {
+                      JSONArray a = (JSONArray) o;
+                      for (int i = 0; i < a.length(); i++) {
+                          Object r = findFirst(a.opt(i), key, depth + 1);
+                          if (r != null) return r;
+                      }
+                  }
+                  return null;
+              }
+
+              static void findAll(Object o, String key, java.util.List<JSONObject> out, int depth) {
+                  if (o == null || depth > 80) return;
+                  if (o instanceof JSONObject) {
+                      JSONObject j = (JSONObject) o;
+                      JSONObject hit = j.optJSONObject(key);
+                      if (hit != null) out.add(hit);
+                      java.util.Iterator<String> it = j.keys();
+                      while (it.hasNext()) findAll(j.opt(it.next()), key, out, depth + 1);
+                  } else if (o instanceof JSONArray) {
+                      JSONArray a = (JSONArray) o;
+                      for (int i = 0; i < a.length(); i++) findAll(a.opt(i), key, out, depth + 1);
+                  }
+              }
+
+              static JSONObject videoState(String videoId, String cookie) {
+                  try {
+                      if (videoId == null || !PLAYLIST_ID.matcher(videoId).matches()) return error("Ungültiges Video");
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject b = baseBody();
+                      b.put("videoId", videoId);
+                      String raw = postRaw("next", b, cookie);
+                      return parseState(raw);
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              static JSONObject parseState(String raw) throws Exception {
+                  JSONObject d = new JSONObject(raw);
+                  JSONObject res = new JSONObject();
+                  res.put("ok", true);
+                  String like = firstMatch(raw, "\"likeStatus\":\"(\\w+)\"");
+                  if (!like.isEmpty()) res.put("likeStatus", like);
+                  Object sb = findFirst(d, "subscribeButtonRenderer", 0);
+                  if (sb instanceof JSONObject) {
+                      JSONObject sr = (JSONObject) sb;
+                      if (sr.has("subscribed")) res.put("subscribed", sr.optBoolean("subscribed", false));
+                      String cid = sr.optString("channelId", "");
+                      if (!cid.isEmpty()) res.put("channelId", cid);
+                  }
+                  if (!res.has("subscribed")) {
+                      String sub = firstMatch(raw, "\"subscribed\":(true|false)");
+                      if (!sub.isEmpty()) res.put("subscribed", "true".equals(sub));
+                  }
+                  Object owner = findFirst(d, "videoOwnerRenderer", 0);
+                  JSONObject ow = owner instanceof JSONObject ? (JSONObject) owner : null;
+                  if (!res.has("channelId") && ow != null) {
+                      Object be = findFirst(ow, "browseEndpoint", 0);
+                      if (be instanceof JSONObject) {
+                          String id = ((JSONObject) be).optString("browseId", "");
+                          if (id.startsWith("UC")) res.put("channelId", id);
+                      }
+                  }
+                  if (!res.has("channelId")) {
+                      String cid = firstMatch(raw, "\"channelId\":\"(UC[\\w-]{22})\"");
+                      if (!cid.isEmpty()) res.put("channelId", cid);
+                  }
+                  JSONObject info = new JSONObject();
+                  Object pi = findFirst(d, "videoPrimaryInfoRenderer", 0);
+                  if (pi instanceof JSONObject) {
+                      JSONObject p = (JSONObject) pi;
+                      info.put("title", text(p.opt("title")));
+                      info.put("when", text(p.opt("dateText")));
+                      Object vc = findFirst(p, "videoViewCountRenderer", 0);
+                      if (vc instanceof JSONObject) info.put("views", text(((JSONObject) vc).opt("viewCount")));
+                  }
+                  if (ow != null) info.put("channel", text(ow.opt("title")));
+                  Object si = findFirst(d, "videoSecondaryInfoRenderer", 0);
+                  if (si instanceof JSONObject) {
+                      JSONObject sec = (JSONObject) si;
+                      JSONObject ad = sec.optJSONObject("attributedDescription");
+                      String desc = ad != null ? ad.optString("content", "") : "";
+                      if (desc.isEmpty()) desc = text(sec.opt("description"));
+                      info.put("desc", desc);
+                  }
+                  info.put("live", raw.contains("\"isLive\":true"));
+                  info.put("chat", raw.contains("\"liveChatRenderer\""));
+                  res.put("info", info);
+                  // Fortsetzung für Kommentare
+                  java.util.List<JSONObject> sections = new java.util.ArrayList<>();
+                  findAll(d, "itemSectionRenderer", sections, 0);
+                  for (JSONObject sec : sections) {
+                      if ("comment-item-section".equals(sec.optString("sectionIdentifier", ""))) {
+                          String[] nx = new String[1];
+                          walk(sec, new JSONArray(), new JSONArray(), new HashSet<>(), new HashSet<>(), 0, nx);
+                          if (nx[0] != null) res.put("commentsToken", nx[0]);
+                      }
+                  }
+                  return res;
+              }
+
+              static JSONObject commentsPage(String token, String cookie) {
+                  try {
+                      if (token == null || token.length() < 10 || token.length() > 8000) return error("Ungültige Fortsetzung");
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject b = baseBody();
+                      b.put("continuation", token);
+                      return parseComments(postRaw("next", b, cookie));
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              static JSONObject parseComments(String raw) throws Exception {
+                  JSONObject d = new JSONObject(raw);
+                  java.util.HashMap<String, JSONObject> ent = new java.util.HashMap<>();
+                  java.util.List<JSONObject> payloads = new java.util.ArrayList<>();
+                  findAll(d, "commentEntityPayload", payloads, 0);
+                  for (JSONObject pl : payloads) {
+                      JSONObject props = pl.optJSONObject("properties");
+                      String id = props == null ? "" : props.optString("commentId", "");
+                      if (!id.isEmpty()) ent.put(id, pl);
+                  }
+                  JSONArray items = new JSONArray();
+                  java.util.HashSet<String> seen = new java.util.HashSet<>();
+                  java.util.List<JSONObject> threads = new java.util.ArrayList<>();
+                  findAll(d, "commentThreadRenderer", threads, 0);
+                  for (JSONObject t : threads) {
+                      JSONObject o = new JSONObject();
+                      Object cvm = findFirst(t, "commentViewModel", 0);
+                      String cid = "";
+                      if (cvm instanceof JSONObject) {
+                          Object inner = ((JSONObject) cvm).opt("commentViewModel");
+                          JSONObject src = inner instanceof JSONObject ? (JSONObject) inner : (JSONObject) cvm;
+                          cid = src.optString("commentId", "");
+                      }
+                      JSONObject pl = cid.isEmpty() ? null : ent.get(cid);
+                      if (pl != null) {
+                          JSONObject props = pl.optJSONObject("properties");
+                          JSONObject author = pl.optJSONObject("author");
+                          JSONObject tb = pl.optJSONObject("toolbar");
+                          JSONObject content = props == null ? null : props.optJSONObject("content");
+                          o.put("author", author == null ? "" : author.optString("displayName", ""));
+                          o.put("text", content == null ? "" : content.optString("content", ""));
+                          o.put("when", props == null ? "" : props.optString("publishedTime", ""));
+                          o.put("likes", tb == null ? "" : tb.optString("likeCountNotliked", ""));
+                      } else {
+                          Object cr = findFirst(t, "commentRenderer", 0);
+                          if (!(cr instanceof JSONObject)) continue;
+                          JSONObject c = (JSONObject) cr;
+                          o.put("author", text(c.opt("authorText")));
+                          o.put("text", text(c.opt("contentText")));
+                          o.put("when", text(c.opt("publishedTimeText")));
+                          o.put("likes", text(c.opt("voteCount")));
+                          cid = c.optString("commentId", "");
+                      }
+                      if (o.optString("text", "").isEmpty()) continue;
+                      if (!cid.isEmpty() && !seen.add(cid)) continue;
+                      items.put(o);
+                  }
+                  JSONObject res = new JSONObject();
+                  res.put("ok", true);
+                  res.put("items", items);
+                  String[] nx = new String[1];
+                  walk(d, new JSONArray(), new JSONArray(), new HashSet<>(), new HashSet<>(), 0, nx);
+                  if (nx[0] != null) res.put("next", nx[0]);
+                  String params = firstMatch(raw, "\"createCommentParams\":\"([^\"]+)\"");
+                  if (!params.isEmpty()) res.put("params", params);
+                  return res;
+              }
+
+              static JSONObject doLike(String arg, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject a = new JSONObject(arg);
+                      String id = a.optString("id", "");
+                      if (!PLAYLIST_ID.matcher(id).matches()) return error("Ungültiges Video");
+                      JSONObject b = baseBody();
+                      JSONObject target = new JSONObject();
+                      target.put("videoId", id);
+                      b.put("target", target);
+                      postRaw(a.optBoolean("on", true) ? "like/like" : "like/removelike", b, cookie);
+                      JSONObject r = new JSONObject();
+                      r.put("ok", true);
+                      return r;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              static JSONObject doSubscribe(String arg, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject a = new JSONObject(arg);
+                      String id = a.optString("id", "");
+                      if (!id.startsWith("UC") || id.length() > 40) return error("Kanal nicht gefunden");
+                      JSONObject b = baseBody();
+                      b.put("channelIds", new JSONArray().put(id));
+                      if (a.optBoolean("on", true)) b.put("params", "EgIIAhgA");
+                      postRaw(a.optBoolean("on", true) ? "subscription/subscribe" : "subscription/unsubscribe", b, cookie);
+                      JSONObject r = new JSONObject();
+                      r.put("ok", true);
+                      return r;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              static JSONObject doComment(String arg, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject a = new JSONObject(arg);
+                      String text = a.optString("text", "").trim();
+                      String params = a.optString("params", "");
+                      if (text.isEmpty() || text.length() > 10000) return error("Kommentar ist leer");
+                      if (params.isEmpty()) return error("Kommentieren ist hier gerade nicht möglich");
+                      JSONObject b = baseBody();
+                      b.put("createCommentParams", params);
+                      b.put("commentText", text);
+                      postRaw("comment/create_comment", b, cookie);
+                      JSONObject r = new JSONObject();
+                      r.put("ok", true);
+                      return r;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              static String readAll(InputStream in) throws Exception {
+                  try (BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                      StringBuilder sb = new StringBuilder(1 << 20);
+                      char[] buf = new char[16384];
+                      int n;
+                      while ((n = r.read(buf)) > 0) sb.append(buf, 0, n);
+                      return sb.toString();
+                  }
+              }
+
+              static JSONObject extractInitialData(String html) {
+                  int i = html.indexOf("var ytInitialData = ");
+                  if (i < 0) i = html.indexOf("window[\"ytInitialData\"] = ");
+                  if (i < 0) i = html.indexOf("ytInitialData = ");
+                  if (i < 0) return null;
+                  int start = html.indexOf('{', i);
+                  if (start < 0) return null;
+                  int end = html.indexOf(";</script>", start);
+                  if (end < 0) return null;
+                  try {
+                      return new JSONObject(html.substring(start, end));
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+
+              private static JSONObject error(String msg) {
+                  JSONObject o = new JSONObject();
+                  try { o.put("error", msg); } catch (Exception ignored) {}
+                  return o;
+              }
+
+              static String text(Object t) {
+                  if (t == null) return "";
+                  if (t instanceof String) return (String) t;
+                  if (t instanceof JSONObject) {
+                      JSONObject o = (JSONObject) t;
+                      if (o.has("simpleText")) return o.optString("simpleText", "");
+                      if (o.has("content") && o.opt("content") instanceof String) return o.optString("content", "");
+                      JSONArray runs = o.optJSONArray("runs");
+                      if (runs != null) {
+                          StringBuilder sb = new StringBuilder();
+                          for (int k = 0; k < runs.length(); k++) {
+                              JSONObject r = runs.optJSONObject(k);
+                              if (r != null) sb.append(r.optString("text", ""));
+                          }
+                          return sb.toString();
+                      }
+                  }
+                  return "";
+              }
+
+              static long durToSec(String s) {
+                  if (s == null || s.isEmpty()) return 0;
+                  long total = 0;
+                  for (String p : s.trim().split(":")) {
+                      try { total = total * 60 + Long.parseLong(p.trim()); } catch (NumberFormatException e) { return 0; }
+                  }
+                  return total;
+              }
+
+              private static void addVideo(JSONArray videos, HashSet<String> seen, String id, String title, String channel,
+                                           long dur, String views, String when) throws Exception {
+                  if (id == null || id.isEmpty() || seen.contains(id)) return;
+                  seen.add(id);
+                  JSONObject v = new JSONObject();
+                  v.put("id", id);
+                  v.put("title", title);
+                  v.put("channel", channel);
+                  v.put("dur", dur);
+                  v.put("views", views);
+                  v.put("when", when);
+                  videos.put(v);
+              }
+
+              private static void addPlaylist(JSONArray playlists, HashSet<String> seen, String id, String title, String info) throws Exception {
+                  if (id == null || id.isEmpty() || seen.contains(id)) return;
+                  seen.add(id);
+                  JSONObject p = new JSONObject();
+                  p.put("id", id);
+                  p.put("title", title);
+                  p.put("info", info);
+                  playlists.put(p);
+              }
+
+              private static void walk(Object o, JSONArray videos, JSONArray playlists, HashSet<String> seenV,
+                                       HashSet<String> seenP, int depth, String[] next) throws Exception {
+                  if (o == null || depth > 120) return;
+                  if (o instanceof JSONArray) {
+                      JSONArray a = (JSONArray) o;
+                      for (int i = 0; i < a.length(); i++) walk(a.opt(i), videos, playlists, seenV, seenP, depth + 1, next);
+                      return;
+                  }
+                  if (!(o instanceof JSONObject)) return;
+                  JSONObject obj = (JSONObject) o;
+
+                  for (String key : VIDEO_KEYS) {
+                      JSONObject vr = obj.optJSONObject(key);
+                      if (vr == null || !vr.has("videoId")) continue;
+                      String title = text(vr.opt("title"));
+                      if (title.isEmpty()) title = text(vr.opt("headline"));
+                      String channel = text(vr.opt("ownerText"));
+                      if (channel.isEmpty()) channel = text(vr.opt("shortBylineText"));
+                      if (channel.isEmpty()) channel = text(vr.opt("longBylineText"));
+                      long dur = vr.has("lengthSeconds") ? vr.optLong("lengthSeconds", 0) : durToSec(text(vr.opt("lengthText")));
+                      String views = text(vr.opt("viewCountText"));
+                      if (views.isEmpty()) views = text(vr.opt("shortViewCountText"));
+                      addVideo(videos, seenV, vr.optString("videoId", ""), title, channel, dur, views, text(vr.opt("publishedTimeText")));
+                  }
+
+                  JSONObject l = obj.optJSONObject("lockupViewModel");
+                  if (l != null && l.has("contentId")) {
+                      String type = l.optString("contentType", "");
+                      String id = l.optString("contentId", "");
+                      JSONObject md = l.optJSONObject("metadata");
+                      JSONObject lm = md == null ? null : md.optJSONObject("lockupMetadataViewModel");
+                      String title = lm == null ? "" : text(lm.opt("title"));
+                      String channel = "", views = "", when = "";
+                      if (lm != null) {
+                          JSONObject m2 = lm.optJSONObject("metadata");
+                          JSONObject cm = m2 == null ? null : m2.optJSONObject("contentMetadataViewModel");
+                          JSONArray rows = cm == null ? null : cm.optJSONArray("metadataRows");
+                          if (rows != null) {
+                              java.util.ArrayList<String> parts = new java.util.ArrayList<>();
+                              for (int r = 0; r < rows.length(); r++) {
+                                  JSONObject row = rows.optJSONObject(r);
+                                  JSONArray mp = row == null ? null : row.optJSONArray("metadataParts");
+                                  if (mp == null) continue;
+                                  for (int k = 0; k < mp.length(); k++) {
+                                      JSONObject part = mp.optJSONObject(k);
+                                      if (part != null) parts.add(text(part.opt("text")));
+                                  }
+                              }
+                              if (parts.size() > 0) channel = parts.get(0);
+                              if (parts.size() > 1) views = parts.get(1);
+                              if (parts.size() > 2) when = parts.get(2);
+                          }
+                      }
+                      if (type.contains("VIDEO")) {
+                          long dur = 0;
+                          JSONObject img = l.optJSONObject("contentImage");
+                          if (img != null) {
+                              Matcher m = DURATION.matcher(img.toString());
+                              if (m.find()) dur = durToSec(m.group(1));
+                          }
+                          addVideo(videos, seenV, id, title, channel, dur, views, when);
+                      } else if (type.contains("PLAYLIST") || type.contains("PODCAST")) {
+                          String info = channel + (views.isEmpty() ? "" : " · " + views);
+                          addPlaylist(playlists, seenP, id, title, info);
+                      }
+                  }
+
+                  for (String key : PLAYLIST_KEYS) {
+                      JSONObject pr = obj.optJSONObject(key);
+                      if (pr == null || !pr.has("playlistId")) continue;
+                      String info = text(pr.opt("videoCountText"));
+                      if (info.isEmpty()) info = text(pr.opt("videoCountShortText"));
+                      addPlaylist(playlists, seenP, pr.optString("playlistId", ""), text(pr.opt("title")), info);
+                  }
+
+                  JSONObject cir = obj.optJSONObject("continuationItemRenderer");
+                  if (cir != null) {
+                      JSONObject ep = cir.optJSONObject("continuationEndpoint");
+                      JSONObject cc = ep == null ? null : ep.optJSONObject("continuationCommand");
+                      if (cc == null && ep != null) {
+                          JSONArray cmds = null;
+                          JSONObject ce = ep.optJSONObject("commandExecutorCommand");
+                          if (ce != null) cmds = ce.optJSONArray("commands");
+                          if (cmds != null) {
+                              for (int q = 0; q < cmds.length(); q++) {
+                                  JSONObject cmd = cmds.optJSONObject(q);
+                                  if (cmd != null && cmd.optJSONObject("continuationCommand") != null) cc = cmd.optJSONObject("continuationCommand");
+                              }
+                          }
+                      }
+                      if (cc != null && !cc.optString("token", "").isEmpty()) next[0] = cc.optString("token");
+                  }
+
+                  java.util.Iterator<String> keys = obj.keys();
+                  while (keys.hasNext()) {
+                      String k = keys.next();
+                      Object child = obj.opt(k);
+                      if (child instanceof JSONObject || child instanceof JSONArray) walk(child, videos, playlists, seenV, seenP, depth + 1, next);
+                  }
+              }
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/drawable/ic_fg.xml')"
+          cat > 'android/app/src/main/res/drawable/ic_fg.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M41,33 L41,75 L77,54 Z" />
+          </vector>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/drawable/ic_pause.xml')"
+          cat > 'android/app/src/main/res/drawable/ic_pause.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M6,19h4V5H6v14zM14,5v14h4V5h-4z" />
+          </vector>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/drawable/ic_play.xml')"
+          cat > 'android/app/src/main/res/drawable/ic_play.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M8,5v14l11,-7z" />
+          </vector>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml')"
+          cat > 'android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/icon_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/values/colors.xml')"
+          cat > 'android/app/src/main/res/values/colors.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="icon_bg">#FF5A36</color>
+          </resources>
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/values/strings.xml')"
+          cat > 'android/app/src/main/res/values/strings.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">BraveTube</string>
+          </resources>
+          BTEOF
+          mkdir -p "$(dirname 'android/build.gradle')"
+          cat > 'android/build.gradle' <<'BTEOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          BTEOF
+          mkdir -p "$(dirname 'android/gradle.properties')"
+          cat > 'android/gradle.properties' <<'BTEOF'
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          BTEOF
+          mkdir -p "$(dirname 'android/settings.gradle')"
+          cat > 'android/settings.gradle' <<'BTEOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "BraveTube"
+          include ':app'
+          BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/res/drawable/ic_headphones.xml')"
+          cat > 'android/app/src/main/res/drawable/ic_headphones.xml' <<'BTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M12,1c-4.97,0 -9,4.03 -9,9v7c0,1.66 1.34,3 3,3h3v-8H5v-2c0,-3.87 3.13,-7 7,-7s7,3.13 7,7v2h-4v8h3c1.66,0 3,-1.34 3,-3v-7c0,-4.97 -4.03,-9 -9,-9z" />
+          </vector>
+          BTEOF
+
+      - name: Gradle laden
+        run: |
+          curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          echo "/tmp/gradle-8.10.2/bin" >> "$GITHUB_PATH"
+
+      - name: APK bauen
+        env:
+          BT_BUILD: ${{ github.run_number }}
+          BT_KEYSTORE: ${{ github.workspace }}/app-signing/bravetube.jks
+        run: |
+          cd android
+          gradle --no-daemon --console=plain assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk ../BraveTube.apk
+          ls -la ../BraveTube.apk
+
+      - name: APK zusätzlich auf der Seite ablegen
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add BraveTube.apk
+          git commit -m "BraveTube.apk (Build ${{ github.run_number }})" || true
+          git push || (git pull --rebase && git push)
+
+      - name: Release veröffentlichen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "app-v${{ github.run_number }}" BraveTube.apk --latest \
+            --title "BraveTube App (Build ${{ github.run_number }})" \
+            --notes "Auf dem Handy in Brave öffnen und installieren: https://github.com/${{ github.repository }}/releases/latest/download/BraveTube.apk"
