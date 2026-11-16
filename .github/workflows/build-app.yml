@@ -1565,6 +1565,55 @@ jobs:
               }
           }
           BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/StreamProxy.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/StreamProxy.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import android.webkit.WebResourceResponse;
+
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Map;
+
+          /** Holt Video-Daten von googlevideo.com mit dem User-Agent, der die Adresse ausgestellt hat (sonst lehnt YouTube sie ab). */
+          final class StreamProxy {
+              private StreamProxy() {}
+
+              static WebResourceResponse fetch(String url, Map<String, String> reqHeaders, String ua) {
+                  try {
+                      HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setRequestMethod("GET");
+                      c.setConnectTimeout(12000);
+                      c.setReadTimeout(20000);
+                      c.setInstanceFollowRedirects(true);
+                      c.setRequestProperty("User-Agent", ua);
+                      c.setRequestProperty("Accept-Encoding", "identity");
+                      String range = reqHeaders == null ? null : reqHeaders.get("Range");
+                      if (range != null) c.setRequestProperty("Range", range);
+                      int code = c.getResponseCode();
+                      if (code != 200 && code != 206) return null;
+                      InputStream in = c.getInputStream();
+                      String type = c.getContentType();
+                      if (type == null) type = "video/mp4";
+                      int semi = type.indexOf(';');
+                      String mime = semi > 0 ? type.substring(0, semi).trim() : type;
+                      Map<String, String> h = new HashMap<>();
+                      for (String k : new String[]{"Content-Length", "Content-Range", "Accept-Ranges"}) {
+                          List<String> v = c.getHeaderFields().get(k);
+                          if (v != null && !v.isEmpty()) h.put(k, v.get(0));
+                      }
+                      if (!h.containsKey("Accept-Ranges")) h.put("Accept-Ranges", "bytes");
+                      h.put("Access-Control-Allow-Origin", "*");
+                      return new WebResourceResponse(mime, null, code, code == 206 ? "Partial Content" : "OK", h, in);
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+          }
+          BTEOF
           mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/YtFetcher.java')"
           cat > 'android/app/src/main/java/com/foxysoxy/bravetube/YtFetcher.java' <<'BTEOF'
           package com.foxysoxy.bravetube;
