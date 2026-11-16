@@ -97,6 +97,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
               <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
 
               <application
@@ -352,6 +353,7 @@ jobs:
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.os.SystemClock;
           import android.util.Rational;
           import android.view.View;
           import android.view.ViewGroup;
@@ -536,6 +538,21 @@ jobs:
                       }
 
                       @Override
+                      public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          try {
+                              Uri u = request.getUrl();
+                              String h = u.getHost();
+                              String ref = request.getRequestHeaders() == null ? null : request.getRequestHeaders().get("Referer");
+                              if (h != null && h.endsWith(".googlevideo.com") && "GET".equals(request.getMethod())
+                                      && !NativeAudio.streamUa.isEmpty() && ref != null && ref.contains(HOST)) {
+                                  return StreamProxy.fetch(u.toString(), request.getRequestHeaders(), NativeAudio.streamUa);
+                              }
+                          } catch (Exception ignored) {
+                          }
+                          return null;
+                      }
+
+                      @Override
                       public void onPageFinished(WebView view, String url) {
                           if (bridgeOk && !startScriptOk && url != null && url.startsWith(SITE)) {
                               view.evaluateJavascript(Assets.read(MainActivity.this, "shim.js"), null);
@@ -662,6 +679,7 @@ jobs:
                           double tt = m.optDouble("t", -1);
                           if (tt >= 0) lastT = tt;
                           applyState();
+                          updateLandscape(getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE);
                           if (playing) prefetch(vid);
                           if (playing && bgMode) {
                               startBackground();
@@ -670,6 +688,27 @@ jobs:
                           break;
                       case "open":
                           openExternal(m.optString("url", ""));
+                          break;
+                      case "hello":
+                          try {
+                              JSONObject o = new JSONObject();
+                              o.put("event", "appinfo");
+                              o.put("t", getPackageManager().getPackageInfo(getPackageName(), 0).versionCode);
+                              sendRaw(o);
+                          } catch (Exception ignored) { }
+                          break;
+                      case "unland":
+                          leaveLandscape();
+                          break;
+                      case "logout":
+                          try {
+                              CookieManager.getInstance().removeAllCookies(null);
+                              CookieManager.getInstance().flush();
+                          } catch (Exception ignored) { }
+                          sendEvent("login", false);
+                          break;
+                      case "share":
+                          shareText(m.optString("title", ""), m.optString("url", ""));
                           break;
                       default:
                           break;
@@ -720,6 +759,42 @@ jobs:
                   try { setPictureInPictureParams(pipParams()); } catch (Exception ignored) { }
               }
 
+
+              // ---------- Querformat = Vollbild wie ein Film ----------
+
+              private boolean landFull;
+
+              private void immersive(boolean on) {
+                  getWindow().getDecorView().setSystemUiVisibility(on
+                          ? (View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+                          : View.SYSTEM_UI_FLAG_VISIBLE);
+              }
+
+              private void updateLandscape(boolean land) {
+                  boolean want = land && playing && !audioOnly && !inPip && fullscreenView == null;
+                  if (want == landFull) return;
+                  landFull = want;
+                  immersive(want);
+                  sendEvent("land", want);
+              }
+
+              private void leaveLandscape() {
+                  landFull = false;
+                  immersive(false);
+                  sendEvent("land", false);
+                  try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); } catch (Exception ignored) { }
+                  ui.postDelayed(() -> {
+                      try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); } catch (Exception ignored) { }
+                  }, 1500);
+              }
+
+              @Override
+              public void onConfigurationChanged(Configuration newConfig) {
+                  super.onConfigurationChanged(newConfig);
+                  updateLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE);
+              }
+
               // ---------- Mini-Fenster (Bild-in-Bild) ----------
 
               private PictureInPictureParams pipParams() {
@@ -760,6 +835,7 @@ jobs:
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
                   inPip = isInPictureInPictureMode;
                   sendEvent("pip", isInPictureInPictureMode);
+                  if (!isInPictureInPictureMode) updateLandscape(getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE);
               }
 
               @Override
@@ -878,6 +954,7 @@ jobs:
                               if (t >= 0) lastT = t;
                               if (!bgMode) { nativeBusy = false; return; }
                               Intent si = new Intent(this, MediaService.class);
+                              si.putExtra("capAt", SystemClock.elapsedRealtime());
                               si.putExtra("urls", res.urls.toArray(new String[0]));
                               si.putExtra("ua", res.ua);
                               si.putExtra("startMs", t > 0 ? (int) (t * 1000) : 0);
@@ -930,6 +1007,20 @@ jobs:
                   }
               }
 
+
+              private void shareText(String title, String url) {
+                  if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return;
+                  try {
+                      Intent i = new Intent(Intent.ACTION_SEND);
+                      i.setType("text/plain");
+                      if (title != null && !title.isEmpty()) i.putExtra(Intent.EXTRA_SUBJECT, title);
+                      i.putExtra(Intent.EXTRA_TEXT, (title == null || title.isEmpty() ? "" : title + "\n") + url);
+                      startActivity(Intent.createChooser(i, "Teilen"));
+                  } catch (Exception e) {
+                      toast("Teilen war nicht möglich.");
+                  }
+              }
+
               private void toast(String msg) {
                   Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
               }
@@ -945,6 +1036,10 @@ jobs:
 
               @Override
               public void onBackPressed() {
+                  if (landFull) {
+                      leaveLandscape();
+                      return;
+                  }
                   if (fullscreenView != null) {
                       chrome.onHideCustomView();
                       return;
@@ -995,7 +1090,7 @@ jobs:
                   String error = "";
               }
 
-              private static final String[][] CLIENTS = {
+              static final String[][] CLIENTS = {
                       // name, version, id, user agent, extra JSON für den Client
                       {"ANDROID_VR", "1.60.19", "28",
                               "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
@@ -1004,6 +1099,104 @@ jobs:
                               "com.google.android.youtube/19.44.38 (Linux; U; Android 11) gzip",
                               "{\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\"}"},
               };
+
+              /** User-Agent des Clients, der die zuletzt gelieferte Stream-Adresse ausgestellt hat (für den Proxy im WebView). */
+              static volatile String streamUa = "";
+
+              /** Video mit Ton in einer Datei (ohne Werbung), für den eigenen Player der Seite. */
+              static org.json.JSONObject streamJson(String videoId) {
+                  org.json.JSONObject out = new org.json.JSONObject();
+                  try {
+                      if (videoId == null || !videoId.matches("^[A-Za-z0-9_-]{11}$")) { out.put("error", "Ungültiges Video"); return out; }
+                      String last = "keine Antwort";
+                      for (String[] c : CLIENTS) {
+                          try {
+                              String raw = post(videoId, c);
+                              String url = pickMuxed(raw);
+                              JSONObject ad = pickAdaptive(raw);
+                              if (url != null || ad != null) {
+                                  streamUa = c[3];
+                                  out.put("ok", true);
+                                  if (url != null) out.put("url", url);
+                                  if (ad != null) out.put("ad", ad);
+                                  out.put("client", c[0]);
+                                  return out;
+                              }
+                              last = c[0] + ": " + status(raw);
+                          } catch (Exception e) {
+                              last = c[0] + ": " + e.getMessage();
+                          }
+                      }
+                      out.put("error", last);
+                  } catch (Exception e) {
+                      try { out.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { }
+                  }
+                  return out;
+              }
+
+              /** Bild (H.264, bis 1080p) und Ton (AAC) als getrennte Dateien: hohe Qualität, Zusammenspiel macht die Seite per MediaSource. */
+              static JSONObject pickAdaptive(String raw) throws Exception {
+                  JSONObject o = new JSONObject(raw);
+                  JSONObject sd = o.optJSONObject("streamingData");
+                  if (sd == null) return null;
+                  JSONArray ad = sd.optJSONArray("adaptiveFormats");
+                  if (ad == null) return null;
+                  JSONObject bestV = null, bestA = null;
+                  int bestH = -1;
+                  long bestRate = -1;
+                  for (int i = 0; i < ad.length(); i++) {
+                      JSONObject f = ad.optJSONObject(i);
+                      if (f == null || f.optString("url", "").isEmpty()) continue;
+                      String mime = f.optString("mimeType", "");
+                      if (f.optLong("contentLength", 0) <= 0 || f.optJSONObject("indexRange") == null || f.optJSONObject("initRange") == null) continue;
+                      if (mime.startsWith("video/mp4") && mime.contains("avc1")) {
+                          int h = f.optInt("height", 0);
+                          if (h > 1080) continue;
+                          if (h > bestH) { bestH = h; bestV = f; }
+                      } else if (mime.startsWith("audio/mp4") && mime.contains("mp4a")) {
+                          long rate = f.optInt("itag", 0) == 140 ? Long.MAX_VALUE : f.optLong("bitrate", 0);
+                          if (rate > bestRate) { bestRate = rate; bestA = f; }
+                      }
+                  }
+                  if (bestV == null || bestA == null) return null;
+                  JSONObject r = new JSONObject();
+                  r.put("v", fmt(bestV));
+                  r.put("a", fmt(bestA));
+                  r.put("h", bestH);
+                  return r;
+              }
+
+              private static JSONObject fmt(JSONObject f) throws Exception {
+                  JSONObject x = new JSONObject();
+                  x.put("url", f.optString("url", ""));
+                  x.put("mime", f.optString("mimeType", ""));
+                  x.put("len", f.optLong("contentLength", 0));
+                  x.put("init", new JSONArray().put(f.getJSONObject("initRange").optLong("start", 0)).put(f.getJSONObject("initRange").optLong("end", 0)));
+                  x.put("idx", new JSONArray().put(f.getJSONObject("indexRange").optLong("start", 0)).put(f.getJSONObject("indexRange").optLong("end", 0)));
+                  x.put("dur", f.optLong("approxDurationMs", 0));
+                  return x;
+              }
+
+              /** Höchste Auflösung bis 720p aus den kombinierten Formaten (Video + Ton in einer Datei). */
+              static String pickMuxed(String raw) throws Exception {
+                  JSONObject o = new JSONObject(raw);
+                  JSONObject sd = o.optJSONObject("streamingData");
+                  if (sd == null) return null;
+                  JSONArray fm = sd.optJSONArray("formats");
+                  if (fm == null) return null;
+                  String best = null;
+                  int bestH = -1;
+                  for (int i = 0; i < fm.length(); i++) {
+                      JSONObject f = fm.optJSONObject(i);
+                      if (f == null) continue;
+                      String url = f.optString("url", "");
+                      if (url.isEmpty() || !f.optString("mimeType", "").startsWith("video/mp4")) continue;
+                      int h = f.optInt("height", 0);
+                      int score = h <= 720 ? h : 0;
+                      if (score > bestH) { bestH = score; best = url; }
+                  }
+                  return best;
+              }
 
               static Result resolve(String videoId) {
                   Result r = new Result();
@@ -1026,7 +1219,7 @@ jobs:
                   return r;
               }
 
-              private static String post(String videoId, String[] c) throws Exception {
+              static String post(String videoId, String[] c) throws Exception {
                   JSONObject client = new JSONObject(c[4]);
                   client.put("clientName", c[0]);
                   client.put("clientVersion", c[1]);
@@ -1133,6 +1326,7 @@ jobs:
           import android.os.Build;
           import android.os.IBinder;
           import android.os.PowerManager;
+          import android.os.SystemClock;
 
           import java.util.HashMap;
           import java.util.Map;
@@ -1155,6 +1349,7 @@ jobs:
               private int urlIndex;
               private String ua = "";
               private int startMs;
+              private long capAt;
 
               /** Läuft der App-eigene Ton gerade (oder wird er vorbereitet)? */
               static boolean nativeActive() { return nativePlayer != null; }
@@ -1181,6 +1376,7 @@ jobs:
                           ua = intent.getStringExtra("ua");
                           if (ua == null) ua = "";
                           startMs = Math.max(0, intent.getIntExtra("startMs", 0));
+                          capAt = intent.getLongExtra("capAt", 0);
                           urlIndex = 0;
                           startNative();
                       }
@@ -1301,12 +1497,16 @@ jobs:
                       p.setOnPreparedListener(mp -> {
                           if (nativePlayer != mp) return;
                           try {
-                              if (startMs > 1000) {
+                              // Die Seite lief weiter, während die App den Ton vorbereitet hat: genau dort einsteigen, damit keine Lücke entsteht.
+                              int target = startMs;
+                              if (capAt > 0 && startMs > 0) target += (int) Math.max(0, Math.min(15000, SystemClock.elapsedRealtime() - capAt)) + 120;
+                              if (target > 1000) {
+                                  final int tg = target;
                                   mp.setOnSeekCompleteListener(m2 -> {
                                       m2.setOnSeekCompleteListener(null);
                                       begin(m2);
                                   });
-                                  mp.seekTo(startMs);
+                                  try { mp.seekTo((long) tg, MediaPlayer.SEEK_CLOSEST); } catch (Throwable t) { mp.seekTo(tg); }
                               } else {
                                   begin(mp);
                               }
@@ -1401,11 +1601,16 @@ jobs:
                       switch (kind) {
                           case "home": url = "https://www.youtube.com/"; break;
                           case "more": return fetchMore(arg, cookie);
+                          case "stream": return NativeAudio.streamJson(arg);
                           case "state": return videoState(arg, cookie);
                           case "comments": return commentsPage(arg, cookie);
                           case "like": return doLike(arg, cookie);
                           case "subscribe": return doSubscribe(arg, cookie);
                           case "comment": return doComment(arg, cookie);
+                          case "report": return reportWatch(arg, cookie);
+                          case "unhist": return removeFromHistory(arg, cookie);
+                          case "caps": return capsList(arg, cookie);
+                          case "capget": return capsGet(arg);
                           case "history": url = "https://www.youtube.com/feed/history"; break;
                           case "wl": url = "https://www.youtube.com/playlist?list=WL"; break;
                           case "playlists": url = "https://www.youtube.com/feed/playlists"; break;
@@ -1722,6 +1927,21 @@ jobs:
                       if (desc.isEmpty()) desc = text(sec.opt("description"));
                       info.put("desc", desc);
                   }
+                  if (!info.has("desc") || info.optString("desc", "").isEmpty()) {
+                      // Neuere YouTube-Antworten legen die Beschreibung in ein eigenes Feld.
+                      String desc = "";
+                      Object ab = findFirst(d, "attributedDescriptionBodyText", 0);
+                      if (ab instanceof JSONObject) desc = ((JSONObject) ab).optString("content", "");
+                      if (desc.isEmpty()) {
+                          Object db = findFirst(d, "descriptionBodyText", 0);
+                          if (db != null) desc = text(db);
+                      }
+                      if (desc.isEmpty()) {
+                          Object ad2 = findFirst(d, "attributedDescription", 0);
+                          if (ad2 instanceof JSONObject) desc = ((JSONObject) ad2).optString("content", "");
+                      }
+                      info.put("desc", desc);
+                  }
                   info.put("live", raw.contains("\"isLive\":true"));
                   info.put("chat", raw.contains("\"liveChatRenderer\""));
                   res.put("info", info);
@@ -1891,6 +2111,242 @@ jobs:
                   }
               }
 
+
+              // ---------- Verlauf: Wiedergabe an YouTube melden, Eintrag bei YouTube löschen ----------
+              private static final Pattern FB_TOKEN = Pattern.compile("\"feedbackToken\":\"([^\"]+)\"");
+              private static final Pattern HIST_WORD = Pattern.compile("(?i)verlauf|history");
+              private static final Pattern VID = Pattern.compile("^[A-Za-z0-9_-]{11}$");
+
+              /** Sucht im Eintrag den Menüpunkt „Aus dem Wiedergabeverlauf entfernen“ und gibt dessen Token zurück. */
+              private static String histToken(Object o, int depth) {
+                  if (o == null || depth > 40) return "";
+                  if (o instanceof JSONArray) {
+                      JSONArray a = (JSONArray) o;
+                      for (int i = 0; i < a.length(); i++) {
+                          String r = histToken(a.opt(i), depth + 1);
+                          if (!r.isEmpty()) return r;
+                      }
+                      return "";
+                  }
+                  if (!(o instanceof JSONObject)) return "";
+                  JSONObject j = (JSONObject) o;
+                  java.util.Iterator<String> it = j.keys();
+                  while (it.hasNext()) {
+                      String r = histToken(j.opt(it.next()), depth + 1);
+                      if (!r.isEmpty()) return r;
+                  }
+                  String t = j.toString();
+                  if (t.length() < 3000 && t.contains("feedbackToken") && HIST_WORD.matcher(t).find()) {
+                      Matcher m = FB_TOKEN.matcher(t);
+                      if (m.find()) return m.group(1);
+                  }
+                  return "";
+              }
+
+              private static void tagFeedback(JSONArray videos, String id, JSONObject node) {
+                  try {
+                      if (id == null || id.isEmpty() || videos.length() == 0) return;
+                      JSONObject v = videos.optJSONObject(videos.length() - 1);
+                      if (v == null || !id.equals(v.optString("id")) || v.has("fb")) return;
+                      String tok = histToken(node, 0);
+                      if (!tok.isEmpty()) v.put("fb", tok);
+                  } catch (Exception ignored) { }
+              }
+
+              static JSONObject removeFromHistory(String token, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      if (token == null || token.length() < 10 || token.length() > 4000) return error("Dieser Eintrag lässt sich nicht löschen");
+                      JSONObject b = baseBody();
+                      b.put("feedbackTokens", new JSONArray().put(token));
+                      b.put("isFeedbackTokenUnencrypted", false);
+                      b.put("shouldMerge", false);
+                      String raw = postRaw("feedback", b, cookie);
+                      if (raw.contains("\"isProcessed\":true") || raw.contains("\"isProcessed\": true")) {
+                          JSONObject ok = new JSONObject();
+                          ok.put("ok", true);
+                          return ok;
+                      }
+                      return error("YouTube hat das Löschen nicht bestätigt");
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              private static final java.util.HashMap<String, String[]> TRACK = new java.util.HashMap<>();
+              private static final String CPN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+              private static String newCpn() {
+                  java.util.Random r = new java.util.Random();
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < 16; i++) sb.append(CPN_CHARS.charAt(r.nextInt(CPN_CHARS.length())));
+                  return sb.toString();
+              }
+
+              private static int pingUrl(String base, String extra, String cpn, String cookie) throws Exception {
+                  String u = base + (base.contains("?") ? "&" : "?") + "ver=2&cpn=" + cpn + extra;
+                  HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+                  c.setConnectTimeout(10000);
+                  c.setReadTimeout(10000);
+                  c.setRequestProperty("User-Agent", UA);
+                  c.setRequestProperty("Cookie", cookie);
+                  c.setRequestProperty("Origin", "https://www.youtube.com");
+                  c.setRequestProperty("Referer", "https://www.youtube.com/");
+                  String auth = sapisidHash(cookie);
+                  if (auth != null) c.setRequestProperty("Authorization", auth);
+                  c.setRequestProperty("X-Goog-AuthUser", "0");
+                  int code = c.getResponseCode();
+                  try { readAll(code >= 400 ? c.getErrorStream() : c.getInputStream()); } catch (Exception ignored) { }
+                  return code;
+              }
+
+              /** Meldet die Wiedergabe wie der YouTube-Player an das Konto: arg = "videoId|sekunden|phase" (phase: start, tick, end). */
+              static JSONObject reportWatch(String arg, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      String[] p = (arg == null ? "" : arg).split("\\|");
+                      if (p.length < 2 || !VID.matcher(p[0]).matches()) return error("Ungültiges Video");
+                      String id = p[0];
+                      long pos = 0;
+                      try { pos = (long) Double.parseDouble(p[1]); } catch (Exception ignored) { }
+                      String phase = p.length > 2 ? p[2] : "start";
+                      String[] t;
+                      synchronized (TRACK) { t = TRACK.get(id); }
+                      if (t == null || "start".equals(phase)) {
+                          JSONObject b = baseBody();
+                          b.put("videoId", id);
+                          b.put("contentCheckOk", true);
+                          b.put("racyCheckOk", true);
+                          JSONObject d = new JSONObject(postRaw("player", b, cookie));
+                          JSONObject pt = d.optJSONObject("playbackTracking");
+                          JSONObject pb = pt == null ? null : pt.optJSONObject("videostatsPlaybackUrl");
+                          JSONObject wt = pt == null ? null : pt.optJSONObject("videostatsWatchtimeUrl");
+                          if (pb == null || pb.optString("baseUrl", "").isEmpty()) {
+                              JSONObject ps = d.optJSONObject("playabilityStatus");
+                              return error("YouTube lieferte keine Verlaufs-Adresse" + (ps == null ? "" : " (" + ps.optString("status", "") + ")"));
+                          }
+                          t = new String[]{pb.optString("baseUrl"), wt == null ? "" : wt.optString("baseUrl", ""), newCpn()};
+                          synchronized (TRACK) {
+                              if (TRACK.size() > 20) TRACK.clear();
+                              TRACK.put(id, t);
+                          }
+                          int code = pingUrl(t[0], "&cmt=" + pos + "&st=" + pos + "&et=" + pos, t[2], cookie);
+                          if (code >= 400) return error("YouTube hat die Wiedergabe nicht angenommen (HTTP " + code + ")");
+                      }
+                      if (!t[1].isEmpty()) {
+                          pingUrl(t[1], "&cmt=" + pos + "&st=0&et=" + pos + "&state=" + ("end".equals(phase) ? "paused" : "playing"), t[2], cookie);
+                      }
+                      JSONObject ok = new JSONObject();
+                      ok.put("ok", true);
+                      return ok;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+
+              // ---------- Untertitel (für den eigenen Player): Liste und Inhalt, auch mit automatischer Übersetzung ----------
+              static JSONObject capsList(String videoId, String cookie) {
+                  try {
+                      if (videoId == null || !VID.matcher(videoId).matches()) return error("Ungültiges Video");
+                      String last = "keine Untertitel-Daten";
+                      for (int w = 0; w < 3; w++) {
+                          try {
+                              String raw;
+                              int ci = 0;
+                              if (w == 0) { raw = NativeAudio.post(videoId, NativeAudio.CLIENTS[1]); ci = 1; }
+                              else if (w == 1) { raw = NativeAudio.post(videoId, NativeAudio.CLIENTS[0]); ci = 0; }
+                              else {
+                                  if (loggedOut(cookie)) continue;
+                                  JSONObject b = baseBody();
+                                  b.put("videoId", videoId);
+                                  b.put("contentCheckOk", true);
+                                  b.put("racyCheckOk", true);
+                                  raw = postRaw("player", b, cookie);
+                                  ci = -1;
+                              }
+                              JSONObject d = new JSONObject(raw);
+                              JSONObject cp = d.optJSONObject("captions");
+                              JSONObject pr = cp == null ? null : cp.optJSONObject("playerCaptionsTracklistRenderer");
+                              JSONArray tr = pr == null ? null : pr.optJSONArray("captionTracks");
+                              if (tr == null || tr.length() == 0) { last = "dieses Video hat keine Untertitel"; continue; }
+                              JSONArray out = new JSONArray();
+                              for (int i = 0; i < tr.length(); i++) {
+                                  JSONObject t = tr.optJSONObject(i);
+                                  if (t == null || t.optString("baseUrl", "").isEmpty()) continue;
+                                  JSONObject o = new JSONObject();
+                                  o.put("n", text(t.opt("name")));
+                                  o.put("l", t.optString("languageCode", ""));
+                                  o.put("k", t.optString("kind", ""));
+                                  o.put("u", t.optString("baseUrl", ""));
+                                  o.put("c", ci);
+                                  out.put(o);
+                              }
+                              if (out.length() == 0) continue;
+                              JSONObject res = new JSONObject();
+                              res.put("ok", true);
+                              res.put("tracks", out);
+                              return res;
+                          } catch (Exception e) {
+                              last = String.valueOf(e.getMessage());
+                          }
+                      }
+                      return error(last);
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              /** arg = JSON {u: Untertitel-Adresse, tl: Zielsprache oder leer, c: Client}. Liefert Zeilen [startMs, endMs, text]. */
+              static JSONObject capsGet(String arg) {
+                  try {
+                      JSONObject a = new JSONObject(arg == null ? "{}" : arg);
+                      String u = a.optString("u", "");
+                      String tl = a.optString("tl", "");
+                      int ci = a.optInt("c", -1);
+                      URL url0 = new URL(u);
+                      String host = url0.getHost() == null ? "" : url0.getHost();
+                      if (!(host.equals("www.youtube.com") || host.endsWith(".youtube.com")) || !url0.getPath().startsWith("/api/timedtext")) return error("Ungültige Untertitel-Adresse");
+                      u = u.replaceAll("&fmt=[^&]*", "");
+                      u += "&fmt=json3";
+                      if (!tl.isEmpty() && tl.matches("^[a-zA-Z-]{2,8}$")) u += "&tlang=" + tl;
+                      HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+                      c.setConnectTimeout(12000);
+                      c.setReadTimeout(15000);
+                      c.setRequestProperty("User-Agent", ci >= 0 && ci < NativeAudio.CLIENTS.length ? NativeAudio.CLIENTS[ci][3] : UA);
+                      c.setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.5");
+                      int code = c.getResponseCode();
+                      if (code >= 400) return error("YouTube antwortet nicht (HTTP " + code + ")");
+                      String body = readAll(c.getInputStream());
+                      if (body.trim().isEmpty()) return error("YouTube lieferte keinen Untertitel-Text");
+                      JSONArray ev = new JSONObject(body).optJSONArray("events");
+                      if (ev == null) return error("Keine Untertitel-Zeilen");
+                      JSONArray cues = new JSONArray();
+                      for (int i = 0; i < ev.length() && cues.length() < 6000; i++) {
+                          JSONObject e = ev.optJSONObject(i);
+                          if (e == null) continue;
+                          JSONArray segs = e.optJSONArray("segs");
+                          if (segs == null) continue;
+                          StringBuilder sb = new StringBuilder();
+                          for (int k = 0; k < segs.length(); k++) {
+                              JSONObject sg = segs.optJSONObject(k);
+                              if (sg != null) sb.append(sg.optString("utf8", ""));
+                          }
+                          String t = sb.toString().replace("\n", " ").trim();
+                          if (t.isEmpty()) continue;
+                          long s0 = e.optLong("tStartMs", 0);
+                          cues.put(new JSONArray().put(s0).put(s0 + Math.max(500, e.optLong("dDurationMs", 2000))).put(t));
+                      }
+                      if (cues.length() == 0) return error("Keine Untertitel-Zeilen");
+                      JSONObject res = new JSONObject();
+                      res.put("ok", true);
+                      res.put("cues", cues);
+                      return res;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
               private static JSONObject error(String msg) {
                   JSONObject o = new JSONObject();
                   try { o.put("error", msg); } catch (Exception ignored) {}
@@ -1973,6 +2429,7 @@ jobs:
                       String views = text(vr.opt("viewCountText"));
                       if (views.isEmpty()) views = text(vr.opt("shortViewCountText"));
                       addVideo(videos, seenV, vr.optString("videoId", ""), title, channel, dur, views, text(vr.opt("publishedTimeText")));
+                      tagFeedback(videos, vr.optString("videoId", ""), vr);
                   }
 
                   JSONObject l = obj.optJSONObject("lockupViewModel");
@@ -2011,6 +2468,7 @@ jobs:
                               if (m.find()) dur = durToSec(m.group(1));
                           }
                           addVideo(videos, seenV, id, title, channel, dur, views, when);
+                          tagFeedback(videos, id, l);
                       } else if (type.contains("PLAYLIST") || type.contains("PODCAST")) {
                           String info = channel + (views.isEmpty() ? "" : " · " + views);
                           addPlaylist(playlists, seenP, id, title, info);
@@ -2149,13 +2607,14 @@ jobs:
           cd android
           gradle --no-daemon --console=plain assembleRelease
           cp app/build/outputs/apk/release/app-release.apk ../BraveTube.apk
+          echo "${{ github.run_number }}" > ../BraveTube-Build.txt
           ls -la ../BraveTube.apk
 
       - name: APK zusätzlich auf der Seite ablegen
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add BraveTube.apk
+          git add BraveTube.apk BraveTube-Build.txt
           git commit -m "BraveTube.apk (Build ${{ github.run_number }})" || true
           git push || (git pull --rebase && git push)
 
