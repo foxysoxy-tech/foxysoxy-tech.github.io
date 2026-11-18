@@ -1095,6 +1095,12 @@ jobs:
 
               static final String[][] CLIENTS = {
                       // name, version, id, user agent, extra JSON für den Client
+                      {"ANDROID_VR", "1.65.10", "28",
+                              "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                              "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
+                      {"ANDROID", "20.10.38", "3",
+                              "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+                              "{\"osName\":\"Android\",\"osVersion\":\"11\"}"},
                       {"ANDROID_VR", "1.60.19", "28",
                               "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                               "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
@@ -1111,8 +1117,9 @@ jobs:
                   org.json.JSONObject out = new org.json.JSONObject();
                   try {
                       if (videoId == null || !videoId.matches("^[A-Za-z0-9_-]{11}$")) { out.put("error", "Ungültiges Video"); return out; }
-                      String last = "keine Antwort";
+                      StringBuilder all = new StringBuilder();
                       for (String[] c : CLIENTS) {
+                          String last;
                           try {
                               String raw = post(videoId, c);
                               String url = pickMuxed(raw);
@@ -1125,12 +1132,14 @@ jobs:
                                   out.put("client", c[0]);
                                   return out;
                               }
-                              last = c[0] + ": " + status(raw);
+                              last = c[0] + " " + c[1] + ": " + status(raw);
                           } catch (Exception e) {
-                              last = c[0] + ": " + e.getMessage();
+                              last = c[0] + " " + c[1] + ": " + e.getMessage();
                           }
+                          if (all.length() > 0) all.append(" | ");
+                          all.append(last);
                       }
-                      out.put("error", last);
+                      out.put("error", all.length() == 0 ? "keine Antwort" : all.toString());
                   } catch (Exception e) {
                       try { out.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { }
                   }
@@ -1254,7 +1263,15 @@ jobs:
                   h.setRequestProperty("Origin", "https://www.youtube.com");
                   h.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
                   int code = h.getResponseCode();
-                  if (code >= 400) throw new Exception("HTTP " + code);
+                  if (code >= 400) {
+                      String why = "";
+                      try {
+                          String eb = YtFetcher.readAll(h.getErrorStream());
+                          JSONObject eo = new JSONObject(eb).optJSONObject("error");
+                          if (eo != null) why = " " + eo.optString("status", "") + " " + eo.optString("message", "");
+                      } catch (Exception ignored) { }
+                      throw new Exception("HTTP " + code + (why.trim().isEmpty() ? "" : " " + why.trim().replaceAll("\\s+", " ")));
+                  }
                   return YtFetcher.readAll(h.getInputStream());
               }
 
