@@ -415,6 +415,7 @@ jobs:
               private final ExecutorService bg = Executors.newSingleThreadExecutor();
               private JavaScriptReplyProxy proxy;
               private boolean playing, audioOnly, inPip, bridgeOk, startScriptOk;
+              private boolean pageMini;
               private BroadcastReceiver pipReceiver;
               private BroadcastReceiver audioReceiver;
               private BroadcastReceiver nativeReceiver;
@@ -673,6 +674,7 @@ jobs:
                       case "state":
                           playing = m.optBoolean("playing", false);
                           audioOnly = m.optBoolean("audio", false);
+                          pageMini = m.optBoolean("mini", false);
                           String t = m.optString("title", "");
                           if (!t.isEmpty()) MediaService.title = t;
                           vid = m.optString("vid", "");
@@ -772,7 +774,8 @@ jobs:
               }
 
               private void updateLandscape(boolean land) {
-                  boolean want = land && playing && !audioOnly && !inPip && fullscreenView == null;
+                  boolean loaded = vid != null && !vid.isEmpty();
+                  boolean want = land && loaded && (playing || !pageMini) && !audioOnly && !inPip && fullscreenView == null;
                   if (want == landFull) return;
                   landFull = want;
                   immersive(want);
@@ -1143,15 +1146,21 @@ jobs:
                   if (ad == null) return null;
                   JSONObject bestV = null, bestA = null;
                   int bestH = -1;
+                  JSONArray opts = new JSONArray();
                   long bestRate = -1;
                   for (int i = 0; i < ad.length(); i++) {
                       JSONObject f = ad.optJSONObject(i);
                       if (f == null || f.optString("url", "").isEmpty()) continue;
                       String mime = f.optString("mimeType", "");
                       if (f.optLong("contentLength", 0) <= 0 || f.optJSONObject("indexRange") == null || f.optJSONObject("initRange") == null) continue;
-                      if (mime.startsWith("video/mp4") && mime.contains("avc1")) {
+                      if (mime.startsWith("video/mp4") && (mime.contains("avc1") || mime.contains("av01"))) {
                           int h = f.optInt("height", 0);
-                          if (h > 1080) continue;
+                          JSONObject oo = fmt(f);
+                          oo.put("h", h);
+                          oo.put("fps", f.optInt("fps", 30));
+                          oo.put("codec", mime.contains("av01") ? "av1" : "avc");
+                          opts.put(oo);
+                          if (!mime.contains("avc1") || h > 1080) continue;
                           if (h > bestH) { bestH = h; bestV = f; }
                       } else if (mime.startsWith("audio/mp4") && mime.contains("mp4a")) {
                           long rate = f.optInt("itag", 0) == 140 ? Long.MAX_VALUE : f.optLong("bitrate", 0);
@@ -1163,6 +1172,7 @@ jobs:
                   r.put("v", fmt(bestV));
                   r.put("a", fmt(bestA));
                   r.put("h", bestH);
+                  r.put("opts", opts);
                   return r;
               }
 
@@ -1658,6 +1668,7 @@ jobs:
                           case "comment": return doComment(arg, cookie);
                           case "report": return reportWatch(arg, cookie);
                           case "unhist": return removeFromHistory(arg, cookie);
+                          case "pladd": return addToPlaylist(arg, cookie);
                           case "caps": return capsList(arg, cookie);
                           case "capget": return capsGet(arg);
                           case "history": url = "https://www.youtube.com/feed/history"; break;
@@ -2088,6 +2099,31 @@ jobs:
                       target.put("videoId", id);
                       b.put("target", target);
                       postRaw(a.optBoolean("on", true) ? "like/like" : "like/removelike", b, cookie);
+                      JSONObject r = new JSONObject();
+                      r.put("ok", true);
+                      return r;
+                  } catch (Exception e) {
+                      return error(e.getMessage() == null ? e.toString() : e.getMessage());
+                  }
+              }
+
+              /** Video zu einer Wiedergabeliste hinzufügen ("WL" = Später ansehen). */
+              static JSONObject addToPlaylist(String arg, String cookie) {
+                  try {
+                      if (loggedOut(cookie)) return error("login");
+                      JSONObject a = new JSONObject(arg);
+                      String id = a.optString("id", ""), pl = a.optString("pl", "WL");
+                      if (!VID.matcher(id).matches()) return error("Ungültiges Video");
+                      if (!PLAYLIST_ID.matcher(pl).matches()) return error("Ungültige Liste");
+                      JSONObject b = baseBody();
+                      b.put("playlistId", pl);
+                      JSONArray acts = new JSONArray();
+                      acts.put(new JSONObject().put("action", "ACTION_ADD_VIDEO").put("addedVideoId", id));
+                      b.put("actions", acts);
+                      String raw = postRaw("browse/edit_playlist", b, cookie);
+                      JSONObject o = new JSONObject(raw);
+                      String st = o.optString("status", "");
+                      if (!st.isEmpty() && !st.contains("SUCCEEDED")) return error("YouTube: " + st);
                       JSONObject r = new JSONObject();
                       r.put("ok", true);
                       return r;
