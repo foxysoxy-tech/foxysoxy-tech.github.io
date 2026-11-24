@@ -113,10 +113,39 @@ jobs:
                       android:launchMode="singleTask"
                       android:supportsPictureInPicture="true"
                       android:resizeableActivity="true"
-                      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density">
+                      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|locale|layoutDirection">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <!-- YouTube-Links (Video, Shorts, Live) öffnen direkt in BraveTube -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="https" />
+                          <data android:scheme="http" />
+                          <data android:host="www.youtube.com" />
+                          <data android:host="m.youtube.com" />
+                          <data android:host="youtube.com" />
+                          <data android:pathPrefix="/watch" />
+                          <data android:pathPrefix="/shorts" />
+                          <data android:pathPrefix="/live" />
+                          <data android:pathPrefix="/embed" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="https" />
+                          <data android:scheme="http" />
+                          <data android:host="youtu.be" />
+                      </intent-filter>
+                      <!-- „Teilen“ aus anderen Apps -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
                       </intent-filter>
                   </activity>
 
@@ -416,6 +445,8 @@ jobs:
               private JavaScriptReplyProxy proxy;
               private boolean playing, audioOnly, inPip, bridgeOk, startScriptOk;
               private boolean pageMini;
+              private boolean helloSeen;
+              private String pendingLink = "";
               private BroadcastReceiver pipReceiver;
               private BroadcastReceiver audioReceiver;
               private BroadcastReceiver nativeReceiver;
@@ -491,6 +522,7 @@ jobs:
                   registerReceiver(screenReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
 
                   loadStart();
+                  handleLinkIntent(getIntent());
               }
 
               private void setupWeb() {
@@ -500,7 +532,12 @@ jobs:
                   s.setDatabaseEnabled(true);
                   s.setMediaPlaybackRequiresUserGesture(false);
                   s.setUseWideViewPort(true);
-                  s.setLoadWithOverviewMode(true);
+                  s.setLoadWithOverviewMode(false);
+                  // Die Seite darf nie als Ganzes gezoomt werden (sonst bleibt sie nach Zwei-Finger-Zoom riesig und abgeschnitten).
+                  s.setSupportZoom(false);
+                  s.setBuiltInZoomControls(false);
+                  s.setDisplayZoomControls(false);
+                  s.setTextZoom(100);
                   s.setSupportMultipleWindows(false);
                   s.setJavaScriptCanOpenWindowsAutomatically(false);
                   s.setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -551,6 +588,12 @@ jobs:
                           } catch (Exception ignored) {
                           }
                           return null;
+                      }
+
+                      @Override
+                      public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                          super.onPageStarted(view, url, favicon);
+                          helloSeen = false;
                       }
 
                       @Override
@@ -692,6 +735,8 @@ jobs:
                           openExternal(m.optString("url", ""));
                           break;
                       case "hello":
+                          helloSeen = true;
+                          if (!pendingLink.isEmpty()) sendOpenVideo();
                           try {
                               JSONObject o = new JSONObject();
                               o.put("event", "appinfo");
@@ -766,7 +811,19 @@ jobs:
 
               private boolean landFull;
 
+              private void cutout(boolean full) {
+                  if (Build.VERSION.SDK_INT < 28) return;
+                  try {
+                      WindowManager.LayoutParams wl = getWindow().getAttributes();
+                      wl.layoutInDisplayCutoutMode = full
+                              ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                              : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+                      getWindow().setAttributes(wl);
+                  } catch (Exception ignored) { }
+              }
+
               private void immersive(boolean on) {
+                  cutout(on);
                   getWindow().getDecorView().setSystemUiVisibility(on
                           ? (View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                           | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
@@ -774,18 +831,31 @@ jobs:
               }
 
               private void updateLandscape(boolean land) {
+                  applyLandscape(land, false);
+              }
+
+              private void applyLandscape(boolean land, boolean force) {
                   boolean loaded = vid != null && !vid.isEmpty();
                   boolean want = land && loaded && (playing || !pageMini) && !audioOnly && !inPip && fullscreenView == null;
-                  if (want == landFull) return;
+                  if (want == landFull && !force) return;
                   landFull = want;
                   immersive(want);
                   sendEvent("land", want);
+                  relayout();
+              }
+
+              /** Nach jedem Drehen/Vollbild-Wechsel die Fenstergröße neu an die Seite geben (gegen falsch große Ansicht). */
+              private void relayout() {
+                  try { web.requestLayout(); } catch (Exception ignored) { }
+                  ui.postDelayed(() -> { try { web.requestLayout(); } catch (Exception ignored) { } sendEvent("resize", null); }, 150);
+                  ui.postDelayed(() -> { try { web.requestLayout(); } catch (Exception ignored) { } sendEvent("resize", null); }, 600);
               }
 
               private void leaveLandscape() {
                   landFull = false;
                   immersive(false);
                   sendEvent("land", false);
+                  relayout();
                   try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); } catch (Exception ignored) { }
                   ui.postDelayed(() -> {
                       try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); } catch (Exception ignored) { }
@@ -795,7 +865,8 @@ jobs:
               @Override
               public void onConfigurationChanged(Configuration newConfig) {
                   super.onConfigurationChanged(newConfig);
-                  updateLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE);
+                  // Immer neu abgleichen (force): Auch wenn der Zustand gleich scheint, müssen Leisten und Seite zur Ausrichtung passen.
+                  applyLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE, true);
               }
 
               // ---------- Mini-Fenster (Bild-in-Bild) ----------
@@ -821,15 +892,47 @@ jobs:
                   return b.build();
               }
 
+              private boolean pipAllowed() {
+                  try {
+                      android.app.AppOpsManager ao = (android.app.AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+                      int mode = ao.checkOpNoThrow("android:picture_in_picture", android.os.Process.myUid(), getPackageName());
+                      return mode != android.app.AppOpsManager.MODE_IGNORED && mode != android.app.AppOpsManager.MODE_ERRORED;
+                  } catch (Exception e) {
+                      return true;
+                  }
+              }
+
+              private void openPipSettings() {
+                  try {
+                      Intent i = new Intent("android.settings.PICTURE_IN_PICTURE_SETTINGS", Uri.parse("package:" + getPackageName()));
+                      startActivity(i);
+                      return;
+                  } catch (Exception ignored) { }
+                  try {
+                      startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+                  } catch (Exception ignored) { }
+              }
+
               private void enterPip(boolean announce) {
                   if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
                       if (announce) toast("Dieses Gerät unterstützt kein Mini-Fenster.");
                       return;
                   }
+                  if (!pipAllowed()) {
+                      if (announce) {
+                          toast("Bild-im-Bild ist für BraveTube ausgeschaltet. Ich öffne die Einstellung: bitte einschalten und zurückkommen.");
+                          openPipSettings();
+                      }
+                      return;
+                  }
                   try {
-                      enterPictureInPictureMode(pipParams());
+                      boolean ok = enterPictureInPictureMode(pipParams());
+                      if (!ok && announce) toast("Das Mini-Fenster ließ sich gerade nicht öffnen. Starte zuerst ein Video.");
                   } catch (Exception e) {
-                      if (announce) toast("Mini-Fenster nicht möglich. Android-Einstellungen → Apps → BraveTube → „Bild-im-Bild“ erlauben.");
+                      if (announce) {
+                          toast("Mini-Fenster nicht möglich. Bitte in den Android-Einstellungen „Bild-im-Bild“ für BraveTube erlauben.");
+                          openPipSettings();
+                      }
                   }
               }
 
@@ -990,6 +1093,52 @@ jobs:
                       nativeBusy = false;
                       if (bgMode) sendEvent("ended", null);
                   }
+              }
+
+              // ---------- YouTube-Links und „Teilen“ in BraveTube öffnen ----------
+
+              private static final Pattern VID_URL = Pattern.compile("(?:[?&]v=|youtu\\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{11})");
+
+              static String videoIdFrom(String text) {
+                  if (text == null) return null;
+                  Matcher m = VID_URL.matcher(text);
+                  return m.find() ? m.group(1) : null;
+              }
+
+              private void handleLinkIntent(Intent in) {
+                  if (in == null) return;
+                  String id = null;
+                  try {
+                      String a = in.getAction();
+                      if (Intent.ACTION_VIEW.equals(a) && in.getData() != null) {
+                          id = videoIdFrom(in.getData().toString());
+                      } else if (Intent.ACTION_SEND.equals(a)) {
+                          id = videoIdFrom(in.getStringExtra(Intent.EXTRA_TEXT));
+                      }
+                  } catch (Exception ignored) { }
+                  if (id == null) return;
+                  in.setAction(Intent.ACTION_MAIN);
+                  in.setData(null);
+                  pendingLink = id;
+                  if (helloSeen) sendOpenVideo();
+              }
+
+              private void sendOpenVideo() {
+                  if (pendingLink.isEmpty()) return;
+                  try {
+                      JSONObject o = new JSONObject();
+                      o.put("event", "openvid");
+                      o.put("id", pendingLink);
+                      sendRaw(o);
+                  } catch (Exception ignored) { }
+                  pendingLink = "";
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  handleLinkIntent(intent);
               }
 
               // ---------- Sonstiges ----------
@@ -2484,6 +2633,41 @@ jobs:
                   return total;
               }
 
+              /** Sucht in einem Eintrag den Anteil, den man schon gesehen hat (YouTube-Verlauf), in Prozent. */
+              private static int findPercent(Object o, int depth) {
+                  if (o == null || depth > 12) return -1;
+                  if (o instanceof JSONObject) {
+                      JSONObject j = (JSONObject) o;
+                      if (j.has("percentDurationWatched")) return j.optInt("percentDurationWatched", -1);
+                      if (j.has("startPercent")) return j.optInt("startPercent", -1);
+                      java.util.Iterator<String> it = j.keys();
+                      while (it.hasNext()) {
+                          String k = it.next();
+                          if (k.equals("menu") || k.equals("serviceEndpoint") || k.equals("navigationEndpoint")) continue;
+                          int r = findPercent(j.opt(k), depth + 1);
+                          if (r >= 0) return r;
+                      }
+                  } else if (o instanceof JSONArray) {
+                      JSONArray a = (JSONArray) o;
+                      for (int i = 0; i < a.length(); i++) {
+                          int r = findPercent(a.opt(i), depth + 1);
+                          if (r >= 0) return r;
+                      }
+                  }
+                  return -1;
+              }
+
+              private static void tagProgress(JSONArray videos, String id, JSONObject src) {
+                  try {
+                      int p = findPercent(src, 0);
+                      if (p < 0) return;
+                      for (int i = videos.length() - 1; i >= 0; i--) {
+                          JSONObject v = videos.optJSONObject(i);
+                          if (v != null && id.equals(v.optString("id", ""))) { v.put("pct", p); return; }
+                      }
+                  } catch (Exception ignored) { }
+              }
+
               private static void addVideo(JSONArray videos, HashSet<String> seen, String id, String title, String channel,
                                            long dur, String views, String when) throws Exception {
                   if (id == null || id.isEmpty() || seen.contains(id)) return;
@@ -2532,6 +2716,7 @@ jobs:
                       if (views.isEmpty()) views = text(vr.opt("shortViewCountText"));
                       addVideo(videos, seenV, vr.optString("videoId", ""), title, channel, dur, views, text(vr.opt("publishedTimeText")));
                       tagFeedback(videos, vr.optString("videoId", ""), vr);
+                      tagProgress(videos, vr.optString("videoId", ""), vr);
                   }
 
                   JSONObject l = obj.optJSONObject("lockupViewModel");
@@ -2571,6 +2756,7 @@ jobs:
                           }
                           addVideo(videos, seenV, id, title, channel, dur, views, when);
                           tagFeedback(videos, id, l);
+                          tagProgress(videos, id, l);
                       } else if (type.contains("PLAYLIST") || type.contains("PODCAST")) {
                           String info = channel + (views.isEmpty() ? "" : " · " + views);
                           addPlaylist(playlists, seenP, id, title, info);
