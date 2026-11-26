@@ -442,6 +442,7 @@ jobs:
               private WebChromeClient chrome;
               private final Handler ui = new Handler(Looper.getMainLooper());
               private final ExecutorService bg = Executors.newSingleThreadExecutor();
+              private final ExecutorService rangeEx = Executors.newFixedThreadPool(4);
               private JavaScriptReplyProxy proxy;
               private boolean playing, audioOnly, inPip, bridgeOk, startScriptOk;
               private boolean pageMini;
@@ -708,7 +709,7 @@ jobs:
                       final String kind = m.optString("kind", "");
                       final String arg = m.optString("arg", "");
                       final String cookie = CookieManager.getInstance().getCookie("https://www.youtube.com");
-                      bg.execute(() -> reply(id, YtFetcher.fetch(kind, arg, cookie)));
+                      ("range".equals(kind) ? rangeEx : bg).execute(() -> reply(id, YtFetcher.fetch(kind, arg, cookie)));
                   } catch (Exception ignored) {
                   }
               }
@@ -1970,6 +1971,53 @@ jobs:
                       "videoWithContextRenderer", "playlistPanelVideoRenderer"};
               private static final String[] PLAYLIST_KEYS = {"gridPlaylistRenderer", "playlistRenderer", "compactPlaylistRenderer"};
 
+              /** Holt einen Byte-Bereich vom Videoserver selbst (wie der Ton im Hintergrund): arg = "von bis adresse". Gibt Status und Daten (Base64) zurück. */
+              static JSONObject rangeFetch(String arg) {
+                  JSONObject out = new JSONObject();
+                  HttpURLConnection c = null;
+                  try {
+                      out.put("ok", true);
+                      if ("probe".equals(arg)) { out.put("probe", true); return out; }
+                      String[] p = String.valueOf(arg).split(" ", 3);
+                      if (p.length < 3) { out.put("error", "Ungültige Anfrage"); return out; }
+                      long a = Long.parseLong(p[0]);
+                      long b = Long.parseLong(p[1]);
+                      String url = p[2];
+                      if (b < a || b - a > 2_000_000L || !url.startsWith("https://") || !url.contains(".googlevideo.com/")) { out.put("error", "Ungültiger Bereich"); return out; }
+                      c = (HttpURLConnection) new URL(url).openConnection();
+                      c.setRequestMethod("GET");
+                      c.setConnectTimeout(12000);
+                      c.setReadTimeout(20000);
+                      c.setInstanceFollowRedirects(true);
+                      c.setRequestProperty("User-Agent", NativeAudio.streamUa.isEmpty() ? UA : NativeAudio.streamUa);
+                      c.setRequestProperty("Accept-Encoding", "identity");
+                      c.setRequestProperty("Range", "bytes=" + a + "-" + b);
+                      int code = c.getResponseCode();
+                      out.put("status", code);
+                      if (code != 200 && code != 206) { out.put("msg", String.valueOf(c.getResponseMessage())); return out; }
+                      long want = b - a + 1;
+                      java.io.InputStream in = c.getInputStream();
+                      java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream((int) Math.min(want, 1 << 20));
+                      byte[] buf = new byte[32768];
+                      long got = 0;
+                      while (got < want) {
+                          int r = in.read(buf, 0, (int) Math.min(buf.length, want - got));
+                          if (r < 0) break;
+                          bo.write(buf, 0, r);
+                          got += r;
+                      }
+                      out.put("n", got);
+                      out.put("b64", android.util.Base64.encodeToString(bo.toByteArray(), android.util.Base64.NO_WRAP));
+                      StreamProxy.last = "Bereich " + a + "-" + b + " -> " + code + ", " + got + " Byte";
+                  } catch (Exception e) {
+                      try { out.put("error", e.getClass().getSimpleName() + " " + e.getMessage()); } catch (Exception ignored) { }
+                      StreamProxy.last = "Bereich Fehler " + e.getClass().getSimpleName() + " " + e.getMessage();
+                  } finally {
+                      try { if (c != null) c.disconnect(); } catch (Exception ignored) { }
+                  }
+                  return out;
+              }
+
               static JSONObject fetch(String kind, String arg, String cookie) {
                   try {
                       String url;
@@ -1978,6 +2026,7 @@ jobs:
                           case "more": return fetchMore(arg, cookie);
                           case "stream": return NativeAudio.streamJson(arg);
                           case "proxy": { JSONObject po = new JSONObject(); po.put("ok", true); po.put("last", StreamProxy.last); po.put("n", StreamProxy.count); return po; }
+                          case "range": return rangeFetch(arg);
                           case "state": return videoState(arg, cookie);
                           case "comments": return commentsPage(arg, cookie);
                           case "like": return doLike(arg, cookie);
