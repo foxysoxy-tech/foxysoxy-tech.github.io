@@ -613,7 +613,9 @@ jobs:
                               try { callback.onCustomViewHidden(); } catch (Exception ignored) { }
                               ui.post(() -> {
                                   if (landFull) {
-                                      leaveLandscape();
+                                      // Beim Drehen löst Android das Vollbild oft von selbst aus: das ist kein Knopfdruck.
+                                      // Sonst würde das Bild sofort wieder ins Hochformat springen und die Drehung beginnt von vorn.
+                                      if (SystemClock.uptimeMillis() - lastConfigMs > 3000) leaveLandscape();
                                   } else {
                                       try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE); } catch (Exception ignored) { }
                                       // Falls die Drehung schon Querformat ist, gibt es keine Konfigurationsänderung: direkt abgleichen.
@@ -834,6 +836,7 @@ jobs:
               // ---------- Querformat = Vollbild wie ein Film ----------
 
               private boolean landFull;
+              private long lastConfigMs;
 
               private void cutout(boolean full) {
                   if (Build.VERSION.SDK_INT < 28) return;
@@ -890,6 +893,7 @@ jobs:
               @Override
               public void onConfigurationChanged(Configuration newConfig) {
                   super.onConfigurationChanged(newConfig);
+                  lastConfigMs = SystemClock.uptimeMillis();
                   // Immer neu abgleichen (force): Auch wenn der Zustand gleich scheint, müssen Leisten und Seite zur Ausrichtung passen.
                   applyLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE, true);
               }
