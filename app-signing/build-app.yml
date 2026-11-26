@@ -1812,6 +1812,191 @@ jobs:
               }
           }
           BTEOF
+          mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/ClientProbe.java')"
+          cat > 'android/app/src/main/java/com/foxysoxy/bravetube/ClientProbe.java' <<'BTEOF'
+          package com.foxysoxy.bravetube;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+
+          /** Diagnose: probiert mehrere YouTube-Clients und prüft, ob deren Videodaten auch weiter hinten in der Datei abrufbar sind. */
+          final class ClientProbe {
+              private ClientProbe() {}
+
+              // Name, Version, Client-ID, User-Agent, Zusatz-JSON für den Client, Zusatz-JSON für den Kontext
+              private static final String[][] CL = {
+                      {"ANDROID_VR", "1.65.10", "28",
+                              "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                              "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}", ""},
+                      {"ANDROID_TESTSUITE", "1.9", "30",
+                              "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                              "{\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\"}", ""},
+                      {"TVHTML5", "7.20250219.14.00", "7",
+                              "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+                              "{}", ""},
+                      {"TVHTML5_SIMPLY_EMBEDDED_PLAYER", "2.0", "85",
+                              "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+                              "{}", "{\"thirdParty\":{\"embedUrl\":\"https://www.youtube.com/\"}}"},
+                      {"WEB_EMBEDDED_PLAYER", "1.20250219.01.00", "56",
+                              "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36",
+                              "{}", "{\"thirdParty\":{\"embedUrl\":\"https://www.youtube.com/\"}}"},
+                      {"MWEB", "2.20250311.03.00", "2",
+                              "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                              "{}", ""},
+                      {"IOS", "20.10.4", "5",
+                              "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                              "{\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\"}", ""},
+                      {"VISIONOS", "0.1", "101",
+                              "com.google.ios.youtube/0.1 (RealityDevice14,1; U; CPU iOS 18_3_2 like Mac OS X;)",
+                              "{\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice14,1\",\"osName\":\"visionOS\",\"osVersion\":\"1.3.21O771\"}", ""},
+                      {"ANDROID", "20.10.38", "3",
+                              "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
+                              "{\"osName\":\"Android\",\"osVersion\":\"11\"}", ""},
+              };
+
+              static JSONObject run(String videoId) {
+                  JSONObject out = new JSONObject();
+                  StringBuilder sb = new StringBuilder();
+                  try {
+                      if (videoId == null || !videoId.matches("^[A-Za-z0-9_-]{11}$")) { out.put("error", "Ungültiges Video"); return out; }
+                      for (String[] c : CL) {
+                          sb.append("\n").append(c[0]).append(" ").append(c[1]).append(":\n");
+                          try {
+                              String raw = post(videoId, c);
+                              JSONObject o = new JSONObject(raw);
+                              JSONObject ps = o.optJSONObject("playabilityStatus");
+                              sb.append("  Status: ").append(ps == null ? "?" : ps.optString("status") + " " + ps.optString("reason", "")).append("\n");
+                              JSONObject sd = o.optJSONObject("streamingData");
+                              if (sd == null) { sb.append("  keine Stream-Daten\n"); continue; }
+                              JSONArray ad = sd.optJSONArray("adaptiveFormats");
+                              JSONArray mx = sd.optJSONArray("formats");
+                              int nUrl = 0, nCipher = 0;
+                              JSONObject audio = null, video = null, muxed = null;
+                              if (ad != null) for (int i = 0; i < ad.length(); i++) {
+                                  JSONObject f = ad.getJSONObject(i);
+                                  if (f.has("url")) nUrl++; else if (f.has("signatureCipher") || f.has("cipher")) nCipher++;
+                                  String mt = f.optString("mimeType", "");
+                                  if (!f.has("url")) continue;
+                                  if (mt.startsWith("audio/mp4") && audio == null) audio = f;
+                                  if (mt.startsWith("video/mp4") && f.optInt("height") >= 360 && f.optInt("height") <= 720 && video == null) video = f;
+                              }
+                              if (mx != null) for (int i = 0; i < mx.length(); i++) {
+                                  JSONObject f = mx.getJSONObject(i);
+                                  if (f.has("url")) { nUrl++; if (muxed == null) muxed = f; } else if (f.has("signatureCipher") || f.has("cipher")) nCipher++;
+                              }
+                              sb.append("  Formate mit Adresse: ").append(nUrl).append(" · nur verschlüsselt: ").append(nCipher)
+                                      .append(" · HLS: ").append(sd.has("hlsManifestUrl") ? "ja" : "nein")
+                                      .append(" · SABR: ").append(sd.has("serverAbrStreamingUrl") ? "ja" : "nein").append("\n");
+                              probe(sb, "Ton", audio, c[3]);
+                              probe(sb, "Bild", video, c[3]);
+                              probe(sb, "gemischt", muxed, c[3]);
+                          } catch (Exception e) {
+                              sb.append("  FEHLER ").append(e.getMessage()).append("\n");
+                          }
+                      }
+                      out.put("ok", true);
+                      out.put("text", sb.toString());
+                  } catch (Exception e) {
+                      try { out.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { }
+                  }
+                  return out;
+              }
+
+              private static void probe(StringBuilder sb, String label, JSONObject f, String ua) {
+                  if (f == null) return;
+                  try {
+                      String u = f.getString("url");
+                      long len = f.optLong("contentLength", 0);
+                      if (len <= 0) { try { len = Long.parseLong(android.net.Uri.parse(u).getQueryParameter("clen")); } catch (Exception ignored) { } }
+                      Uri uri = new Uri(u);
+                      sb.append("  ").append(label).append(" itag ").append(f.optInt("itag")).append(" ").append(uri.flags).append(" Größe ").append(len).append("\n");
+                      sb.append("    Anfang: ").append(get(u, ua, 0, 1023)).append("\n");
+                      if (len > 3000000) {
+                          int[] pc = {30, 60, 95};
+                          for (int p : pc) {
+                              long o = len * p / 100;
+                              sb.append("    bei ").append(p).append(" %: ").append(get(u, ua, o, o + 65535)).append("\n");
+                          }
+                      }
+                  } catch (Exception e) {
+                      sb.append("    Prüf-Fehler ").append(e.getMessage()).append("\n");
+                  }
+              }
+
+              /** Kurzinfo über Parameter der Adresse (pot, n, c, sabr). */
+              private static final class Uri {
+                  final String flags;
+                  Uri(String u) {
+                      android.net.Uri x = android.net.Uri.parse(u);
+                      flags = "c=" + x.getQueryParameter("c") + (x.getQueryParameter("pot") != null ? " pot" : " kein-pot")
+                              + (x.getQueryParameter("n") != null ? " n" : "") + (x.getQueryParameter("sabr") != null ? " sabr" : "");
+                  }
+              }
+
+              private static String get(String u, String ua, long a, long b) {
+                  HttpURLConnection h = null;
+                  try {
+                      h = (HttpURLConnection) new URL(u).openConnection();
+                      h.setConnectTimeout(10000);
+                      h.setReadTimeout(12000);
+                      h.setRequestProperty("User-Agent", ua);
+                      h.setRequestProperty("Range", "bytes=" + a + "-" + b);
+                      int code = h.getResponseCode();
+                      int n = 0;
+                      if (code < 400) {
+                          InputStream in = h.getInputStream();
+                          byte[] buf = new byte[16384];
+                          int r;
+                          while ((r = in.read(buf)) > 0 && n < 70000) n += r;
+                      }
+                      return "HTTP " + code + " · " + n + " B";
+                  } catch (Exception e) {
+                      return "FEHLER " + e.getClass().getSimpleName();
+                  } finally {
+                      try { if (h != null) h.disconnect(); } catch (Exception ignored) { }
+                  }
+              }
+
+              private static String post(String videoId, String[] c) throws Exception {
+                  JSONObject client = new JSONObject(c[4]);
+                  client.put("clientName", c[0]);
+                  client.put("clientVersion", c[1]);
+                  client.put("hl", "de");
+                  client.put("gl", "DE");
+                  JSONObject context = new JSONObject();
+                  context.put("client", client);
+                  if (!c[5].isEmpty()) {
+                      JSONObject extra = new JSONObject(c[5]);
+                      java.util.Iterator<String> it = extra.keys();
+                      while (it.hasNext()) { String k = it.next(); context.put(k, extra.get(k)); }
+                  }
+                  JSONObject body = new JSONObject();
+                  body.put("context", context);
+                  body.put("videoId", videoId);
+                  body.put("contentCheckOk", true);
+                  body.put("racyCheckOk", true);
+                  HttpURLConnection h = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/player?prettyPrint=false").openConnection();
+                  h.setRequestMethod("POST");
+                  h.setDoOutput(true);
+                  h.setConnectTimeout(12000);
+                  h.setReadTimeout(15000);
+                  h.setRequestProperty("User-Agent", c[3]);
+                  h.setRequestProperty("Content-Type", "application/json");
+                  h.setRequestProperty("X-YouTube-Client-Name", c[2]);
+                  h.setRequestProperty("X-YouTube-Client-Version", c[1]);
+                  h.setRequestProperty("Origin", "https://www.youtube.com");
+                  h.getOutputStream().write(body.toString().getBytes(StandardCharsets.UTF_8));
+                  int code = h.getResponseCode();
+                  if (code >= 400) throw new Exception("HTTP " + code);
+                  return YtFetcher.readAll(h.getInputStream());
+              }
+          }
+          BTEOF
           mkdir -p "$(dirname 'android/app/src/main/java/com/foxysoxy/bravetube/StreamProxy.java')"
           cat > 'android/app/src/main/java/com/foxysoxy/bravetube/StreamProxy.java' <<'BTEOF'
           package com.foxysoxy.bravetube;
@@ -2027,6 +2212,7 @@ jobs:
                           case "stream": return NativeAudio.streamJson(arg);
                           case "proxy": { JSONObject po = new JSONObject(); po.put("ok", true); po.put("last", StreamProxy.last); po.put("n", StreamProxy.count); return po; }
                           case "range": return rangeFetch(arg);
+                          case "clients": return ClientProbe.run(arg);
                           case "state": return videoState(arg, cookie);
                           case "comments": return commentsPage(arg, cookie);
                           case "like": return doLike(arg, cookie);
