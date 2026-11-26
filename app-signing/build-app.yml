@@ -582,7 +582,7 @@ jobs:
                               String h = u.getHost();
                               String ref = request.getRequestHeaders() == null ? null : request.getRequestHeaders().get("Referer");
                               if (h != null && h.endsWith(".googlevideo.com") && "GET".equals(request.getMethod())
-                                      && !NativeAudio.streamUa.isEmpty() && ref != null && ref.contains(HOST)) {
+                                      && !NativeAudio.streamUa.isEmpty() && (ref == null ? u.getPath() != null && u.getPath().startsWith("/videoplayback") : ref.contains(HOST))) {
                                   return StreamProxy.fetch(u.toString(), request.getRequestHeaders(), NativeAudio.streamUa);
                               }
                           } catch (Exception ignored) {
@@ -611,25 +611,7 @@ jobs:
                           // das eigene Querformat-Vollbild der Seite benutzen bzw. wieder zurück ins Hochformat.
                           if (vid != null && !vid.isEmpty() && fullscreenView == null) {
                               try { callback.onCustomViewHidden(); } catch (Exception ignored) { }
-                              ui.post(() -> {
-                                  if (landFull) {
-                                      // Beim Drehen löst Android das Vollbild oft von selbst aus: das ist kein Knopfdruck.
-                                      // Sonst würde das Bild sofort wieder ins Hochformat springen und die Drehung beginnt von vorn.
-                                      if (SystemClock.uptimeMillis() - lastConfigMs > 3000) leaveLandscape();
-                                  } else {
-                                      try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE); } catch (Exception ignored) { }
-                                      // Falls die Drehung schon Querformat ist, gibt es keine Konfigurationsänderung: direkt abgleichen.
-                                      if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                                          applyLandscape(true, true);
-                                      }
-                                      // Kommt kein Vollbild zustande (z. B. nur Ton, Mini-Fenster), die Sperre wieder lösen.
-                                      ui.postDelayed(() -> {
-                                          if (!landFull && fullscreenView == null) {
-                                              try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); } catch (Exception ignored) { }
-                                          }
-                                      }, 2500);
-                                  }
-                              });
+                              ui.post(() -> landscapeButton(true));
                               return;
                           }
                           if (fullscreenView != null) {
@@ -773,6 +755,9 @@ jobs:
                       case "unland":
                           leaveLandscape();
                           break;
+                      case "land":
+                          landscapeButton(false);
+                          break;
                       case "logout":
                           try {
                               CookieManager.getInstance().removeAllCookies(null);
@@ -837,6 +822,39 @@ jobs:
 
               private boolean landFull;
               private long lastConfigMs;
+              private android.view.OrientationEventListener orient;
+              private boolean sawLand;
+              private long portSince;
+              private boolean suppressLand;   // nach „Vollbild beenden“ nicht von selbst wieder ins Querformat springen, bis das Handy einmal aufrecht war
+
+              /** Zurückschwenken ins Hochformat beendet das Querformat-Vollbild sofort (auch wenn die Drehung gesperrt war). */
+              private void startOrientWatch() {
+                  if (orient == null) {
+                      orient = new android.view.OrientationEventListener(this) {
+                          @Override public void onOrientationChanged(int a) {
+                              if (a == ORIENTATION_UNKNOWN) { portSince = 0; return; }
+                              boolean land = (a >= 60 && a <= 120) || (a >= 240 && a <= 300);
+                              boolean port = a <= 30 || a >= 330 || (a >= 150 && a <= 210);
+                              if (port && suppressLand) suppressLand = false;
+                              if (!landFull) { sawLand = false; portSince = 0; return; }
+                              if (land) { sawLand = true; portSince = 0; return; }
+                              if (port && sawLand) {
+                                  long now = SystemClock.uptimeMillis();
+                                  if (portSince == 0) portSince = now;
+                                  else if (now - portSince > 350) {
+                                      portSince = 0; sawLand = false;
+                                      ui.post(() -> { if (landFull) leaveLandscape(); });
+                                  }
+                              } else portSince = 0;
+                          }
+                      };
+                  }
+                  try { if (orient.canDetectOrientation()) orient.enable(); } catch (Exception ignored) { }
+              }
+
+              private void stopOrientWatch() {
+                  try { if (orient != null) orient.disable(); } catch (Exception ignored) { }
+              }
 
               private void cutout(boolean full) {
                   if (Build.VERSION.SDK_INT < 28) return;
@@ -857,6 +875,26 @@ jobs:
                           : View.SYSTEM_UI_FLAG_VISIBLE);
               }
 
+              /** Vollbild-Knopf (Android-eigener oder der der Seite): Querformat-Vollbild an/aus. autoRotate = Android hat es beim Drehen selbst ausgelöst. */
+              private void landscapeButton(boolean fromChrome) {
+                  if (landFull) {
+                      // Beim Drehen löst Android das Vollbild oft von selbst aus: das ist kein Knopfdruck.
+                      if (!fromChrome || SystemClock.uptimeMillis() - lastConfigMs > 3000) leaveLandscape();
+                      return;
+                  }
+                  if (fromChrome && suppressLand) return;   // gerade erst beendet, Android-Auslösung ignorieren
+                  suppressLand = false;
+                  try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE); } catch (Exception ignored) { }
+                  if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                      applyLandscape(true, true);
+                  }
+                  ui.postDelayed(() -> {
+                      if (!landFull && fullscreenView == null) {
+                          try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); } catch (Exception ignored) { }
+                      }
+                  }, 2500);
+              }
+
               private void updateLandscape(boolean land) {
                   applyLandscape(land, false);
               }
@@ -864,9 +902,10 @@ jobs:
               private void applyLandscape(boolean land, boolean force) {
                   if (fullscreenView != null) { immersive(true); return; }   // Android-Vollbild aktiv: Leisten bleiben weg
                   boolean loaded = vid != null && !vid.isEmpty();
-                  boolean want = land && loaded && (playing || !pageMini) && !audioOnly && !inPip && fullscreenView == null;
+                  boolean want = land && !suppressLand && loaded && (playing || !pageMini) && !audioOnly && !inPip && fullscreenView == null;
                   if (want == landFull && !force) return;
                   landFull = want;
+                  if (want) { sawLand = false; portSince = 0; suppressLand = false; startOrientWatch(); }
                   immersive(want);
                   sendEvent("land", want);
                   relayout();
@@ -881,13 +920,15 @@ jobs:
 
               private void leaveLandscape() {
                   landFull = false;
+                  suppressLand = true;
+                  startOrientWatch();
                   immersive(false);
                   sendEvent("land", false);
                   relayout();
                   try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); } catch (Exception ignored) { }
                   ui.postDelayed(() -> {
                       try { setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); } catch (Exception ignored) { }
-                  }, 1500);
+                  }, 600);
               }
 
               @Override
@@ -1776,44 +1817,124 @@ jobs:
 
           import android.webkit.WebResourceResponse;
 
+          import java.io.FilterInputStream;
+          import java.io.IOException;
           import java.io.InputStream;
           import java.net.HttpURLConnection;
           import java.net.URL;
           import java.util.HashMap;
-          import java.util.List;
           import java.util.Map;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
 
           /** Holt Video-Daten von googlevideo.com mit dem User-Agent, der die Adresse ausgestellt hat (sonst lehnt YouTube sie ab). */
           final class StreamProxy {
               private StreamProxy() {}
 
+              /** Letzter Vorgang (für die Fehlersuche, die Seite kann das abfragen). */
+              static volatile String last = "noch nichts geladen";
+              static volatile int count = 0;
+
+              private static final Pattern RANGE = Pattern.compile("bytes=(\\d*)-(\\d*)");
+
               static WebResourceResponse fetch(String url, Map<String, String> reqHeaders, String ua) {
+                  String range = null;
+                  if (reqHeaders != null) {
+                      for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
+                          if ("range".equalsIgnoreCase(e.getKey())) range = e.getValue();
+                      }
+                  }
+                  long start = 0;
+                  long end = -1;
+                  boolean suffix = false;
+                  if (range != null) {
+                      Matcher m = RANGE.matcher(range);
+                      if (m.find()) {
+                          suffix = m.group(1).isEmpty();
+                          try { if (!m.group(1).isEmpty()) start = Long.parseLong(m.group(1)); } catch (Exception ignored) { }
+                          try { if (!m.group(2).isEmpty()) end = Long.parseLong(m.group(2)); } catch (Exception ignored) { }
+                      }
+                  }
+                  count++;
+                  String tag = "#" + count + " " + (range == null ? "ohne Range" : range);
+                  HttpURLConnection c = null;
                   try {
-                      HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                      c = (HttpURLConnection) new URL(url).openConnection();
                       c.setRequestMethod("GET");
                       c.setConnectTimeout(12000);
                       c.setReadTimeout(20000);
                       c.setInstanceFollowRedirects(true);
                       c.setRequestProperty("User-Agent", ua);
                       c.setRequestProperty("Accept-Encoding", "identity");
-                      String range = reqHeaders == null ? null : reqHeaders.get("Range");
                       if (range != null) c.setRequestProperty("Range", range);
                       int code = c.getResponseCode();
-                      if (code != 200 && code != 206) return null;
-                      InputStream in = c.getInputStream();
+                      if (code != 200 && code != 206) {
+                          last = tag + " -> HTTP " + code;
+                          c.disconnect();
+                          return null;
+                      }
+                      InputStream raw = c.getInputStream();
+                      final HttpURLConnection conn = c;
+                      long len = -1;
+                      try { len = Long.parseLong(String.valueOf(c.getHeaderField("Content-Length")).trim()); } catch (Exception ignored) { }
+                      String cr = c.getHeaderField("Content-Range");
+                      int status = code;
+                      long total = -1;
+                      if (code == 206 && cr != null) {
+                          int sl = cr.lastIndexOf('/');
+                          if (sl > 0) { try { total = Long.parseLong(cr.substring(sl + 1).trim()); } catch (Exception ignored) { } }
+                      }
+                      if (code == 200 && range != null && !suffix && total < 0 && len > 0 && (start > 0 || end >= 0)) {
+                          // Server hat den Bereich ignoriert und schickt alles: Anfang überspringen und als Teilantwort weitergeben.
+                          total = len;
+                          long skipped = 0;
+                          while (skipped < start) {
+                              long s = raw.skip(start - skipped);
+                              if (s <= 0) { if (raw.read() < 0) break; s = 1; }
+                              skipped += s;
+                          }
+                          if (skipped < start) { last = tag + " -> Überspringen fehlgeschlagen"; c.disconnect(); return null; }
+                          long e2 = end >= 0 ? Math.min(end, total - 1) : total - 1;
+                          if (e2 < start) { last = tag + " -> Bereich ungültig"; c.disconnect(); return null; }
+                          cr = "bytes " + start + "-" + e2 + "/" + total;
+                          len = e2 - start + 1;
+                          status = 206;
+                      } else if (code == 206 && cr == null && len >= 0) {
+                          long e2 = start + len - 1;
+                          cr = "bytes " + start + "-" + e2 + "/" + (total >= 0 ? total : "*");
+                      }
                       String type = c.getContentType();
                       if (type == null) type = "video/mp4";
                       int semi = type.indexOf(';');
                       String mime = semi > 0 ? type.substring(0, semi).trim() : type;
                       Map<String, String> h = new HashMap<>();
-                      for (String k : new String[]{"Content-Length", "Content-Range", "Accept-Ranges"}) {
-                          List<String> v = c.getHeaderFields().get(k);
-                          if (v != null && !v.isEmpty()) h.put(k, v.get(0));
-                      }
-                      if (!h.containsKey("Accept-Ranges")) h.put("Accept-Ranges", "bytes");
+                      if (len >= 0) h.put("Content-Length", String.valueOf(len));
+                      if (cr != null && status == 206) h.put("Content-Range", cr);
+                      h.put("Accept-Ranges", "bytes");
                       h.put("Access-Control-Allow-Origin", "*");
-                      return new WebResourceResponse(mime, null, code, code == 206 ? "Partial Content" : "OK", h, in);
+                      last = tag + " -> " + status + (cr != null ? " " + cr : "") + (len >= 0 ? " Länge " + len : "");
+                      final long[] left = {(status == 206 && len >= 0) ? len : Long.MAX_VALUE};
+                      InputStream in = new FilterInputStream(raw) {
+                          @Override public int read() throws IOException {
+                              if (left[0] <= 0) return -1;
+                              int b = super.read();
+                              if (b >= 0) left[0]--;
+                              return b;
+                          }
+                          @Override public int read(byte[] buf, int off, int n) throws IOException {
+                              if (left[0] <= 0) return -1;
+                              int r = super.read(buf, off, (int) Math.min((long) n, left[0]));
+                              if (r > 0) left[0] -= r;
+                              return r;
+                          }
+                          @Override public void close() throws IOException {
+                              try { super.close(); } finally { conn.disconnect(); }
+                          }
+                      };
+                      return new WebResourceResponse(mime, null, status, status == 206 ? "Partial Content" : "OK", h, in);
                   } catch (Exception e) {
+                      last = tag + " -> Fehler " + e.getClass().getSimpleName() + " " + e.getMessage();
+                      try { if (c != null) c.disconnect(); } catch (Exception ignored) { }
                       return null;
                   }
               }
@@ -1856,6 +1977,7 @@ jobs:
                           case "home": url = "https://www.youtube.com/"; break;
                           case "more": return fetchMore(arg, cookie);
                           case "stream": return NativeAudio.streamJson(arg);
+                          case "proxy": { JSONObject po = new JSONObject(); po.put("ok", true); po.put("last", StreamProxy.last); po.put("n", StreamProxy.count); return po; }
                           case "state": return videoState(arg, cookie);
                           case "comments": return commentsPage(arg, cookie);
                           case "like": return doLike(arg, cookie);
