@@ -34,20 +34,4 @@ a=track('bt-test/a.mp4','https://test.googlevideo.com/bt-a?itag=140','audio/mp4;
 ad={"v":v,"a":a,"h":360,"opts":[]}
 open('bt-test/ad.json','w').write(json.dumps(ad))
 print(json.dumps(ad))
-PY
-  ls -la bt-test
-  SZ=$(stat -c %s bt-test/a.mp4)
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  git add bt-test
-  git commit -m "Testdateien (VP9, getrennte Spuren) fuer den Emulator-Test"
-  git push
-  for i in $(seq 1 100); do
-    L=$(curl -sI "https://foxysoxy-tech.github.io/bt-test/a.mp4?x=$RANDOM" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}')
-    [ "$(code $AD)" = "200" ] && [ "$L" = "$SZ" ] && break
-    sleep 6
-  done
-fi
-echo "Testvideo: HTTP $(code $U) Spuren: HTTP $(code $AD)"
-curl -sI -H "Range: bytes=0-99" "$U" | head -12
-
+echo "mock.out" > mock.out
