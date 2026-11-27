@@ -28,6 +28,8 @@ need(isinstance(t3,dict) and t3.get('d') and t3['d']*0.08<=t3['t']<=t3['d']*0.1+
 u1,u2,u3=get('t1',raw2),get('t2',raw2),get('t3',raw2)
 out.append('')
 out.append('Zusatz (Proxy-Pfad, nur zur Information): t1=%s t2=%s t3=%s'%(u1,u2,u3))
+out.append('Proxy-Status Phase 1: %s'%get('proxy'))
+out.append('Proxy-Status Phase 2: %s'%get('proxy',raw2))
 out.append('')
 out.append('--- App/WebView-Meldungen (letzte) ---')
 try: a1=open('alllog1.txt',encoding='utf-8',errors='replace').read()
