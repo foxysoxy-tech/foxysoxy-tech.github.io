@@ -84,6 +84,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
+          emulator-options: -no-window -gpu guest -no-snapshot -noaudio -no-boot-anim
           script: bash .github/bt/emu.sh
       - name: Ergebnis auswerten
         run: |
