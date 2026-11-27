@@ -50,3 +50,4 @@ PY
 fi
 echo "Testvideo: HTTP $(code $U) Spuren: HTTP $(code $AD)"
 curl -sI -H "Range: bytes=0-99" "$U" | head -12
+
