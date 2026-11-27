@@ -30,6 +30,12 @@ out.append('')
 out.append('Zusatz (Proxy-Pfad, nur zur Information): t1=%s t2=%s t3=%s'%(u1,u2,u3))
 out.append('')
 out.append('--- App/WebView-Meldungen (letzte) ---')
+try: a1=open('alllog1.txt',encoding='utf-8',errors='replace').read()
+except Exception: a1=''
+out.append('--- Phase 1 Detail ---')
+k1=[l for l in a1.splitlines() if re.search(r'BTTEST|ANR|anr_|FATAL|AndroidRuntime|died|Choreographer|MediaCodec|cr_Media|MediaPlayer|CONSOLE|BraveTube|lowmemory|lmkd|Killing|Force finishing|am_proc_died|StrictMode',l) and 'VideoCapture' not in l]
+out.append('\n'.join(k1[-70:])[-9000:])
+out.append('--- Ende Phase 1 ---')
 keep=[l for l in allog.splitlines() if re.search(r'chromium|BraveTube|BTTEST|AndroidRuntime|FATAL|cr_Media|Console',l)]
 out.append('\n'.join(keep[-60:])[-7000:])
 txt='\n'.join(out)
