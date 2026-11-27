@@ -24,7 +24,7 @@ if 'isMuxedItag' not in s:
 if 'selfTest(' not in s:
     k='        web.loadUrl(last);\n'
     assert s.count(k)==1, 'Stelle 2 nicht gefunden'
-    s=s.replace(k,'        if (getIntent() != null && getIntent().getStringExtra("testurl") != null) NativeAudio.testUrl = getIntent().getStringExtra("testurl");\n'+k+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
+    s=s.replace(k,'        if (getIntent() != null && getIntent().getStringExtra("testurl") != null) NativeAudio.testUrl = getIntent().getStringExtra("testurl");\n        web.loadUrl(getIntent() != null && getIntent().getStringExtra("selftest") != null ? SITE + "BraveTube3.20.html" : last);\n'+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
     i=s.rstrip().rfind('}')
     s=s[:i]+'''
     private void jsLog(final String tag, final String js) {
