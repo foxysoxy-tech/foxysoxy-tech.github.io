@@ -1,0 +1,33 @@
+import json,re,sys,os
+raw=open('bttest.log',encoding='utf-8',errors='replace').read()
+try: allog=open('alllog.txt',encoding='utf-8',errors='replace').read()
+except Exception: allog=''
+def get(tag):
+    m=re.findall(r'BTTEST\s*\(\s*\d+\):\s*'+tag+r':\s*(.*)',raw)
+    if not m: return None
+    v=m[-1].strip()
+    try:
+        v=json.loads(v)
+        if isinstance(v,str):
+            try: v=json.loads(v)
+            except Exception: pass
+    except Exception: pass
+    return v
+t1,t2,t3=get('t1'),get('t2'),get('t3')
+out=['## Emulator-Test (echtes Android, Video p3ug4IRm_ic)','','start: %s'%get('start'),'t1 (nach ~25 s): %s'%t1,'t2 (nach Spulen auf 60 Prozent): %s'%t2,'t3 (nach Spulen auf 10 Prozent): %s'%t3,'']
+ok=True
+def need(c,msg):
+    global ok
+    out.append(('OK     ' if c else 'FEHLER ')+msg)
+    if not c: ok=False
+need(isinstance(t1,dict) and (t1.get('t') or 0)>2 and not t1.get('p') and not t1.get('e'),'Video startet und laeuft')
+need(isinstance(t2,dict) and t2.get('d') and t2['t']>=t2['d']*0.55 and t2['rs']>=3 and not t2.get('e'),'Vorspulen funktioniert')
+need(isinstance(t3,dict) and t3.get('d') and t3['d']*0.08<=t3['t']<=t3['d']*0.1+30 and t3['rs']>=3 and not t3.get('e'),'Zurueckspulen funktioniert')
+out.append('')
+out.append('--- App/WebView-Meldungen (letzte) ---')
+keep=[l for l in allog.splitlines() if re.search(r'chromium|BraveTube|BTTEST|AndroidRuntime|FATAL|cr_Media|Console',l)]
+out.append('\n'.join(keep[-60:])[-7000:])
+txt='\n'.join(out)
+print(txt)
+open(os.environ.get('GITHUB_STEP_SUMMARY','/dev/null'),'a').write(txt+'\n')
+sys.exit(0 if ok else 1)
