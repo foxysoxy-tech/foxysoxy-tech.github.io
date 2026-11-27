@@ -7,13 +7,10 @@ def wr(p,s): open(p,'w',encoding='utf-8').write(s)
 p=J+'MainActivity.java'
 s=rd(p)
 
-# 1) Dateien mit Bild+Ton in einer Datei (itag 18, 22 ...) laden ohne Proxy direkt; Testhost 10.0.2.2 wie googlevideo behandeln
+# 1) Dateien mit Bild+Ton in einer Datei (itag 18, 22 ...) laden ohne Proxy direkt
 if 'isMuxedItag' not in s:
-    a='h.endsWith(".googlevideo.com") && "GET".equals'
-    assert s.count(a)==1, 'Stelle 1a nicht gefunden'
-    s=s.replace(a,'(h.endsWith(".googlevideo.com") || (NativeAudio.testUrl != null && "10.0.2.2".equals(h))) && "GET".equals')
     a='&& !NativeAudio.streamUa.isEmpty() && (ref == null'
-    assert s.count(a)==1, 'Stelle 1b nicht gefunden'
+    assert s.count(a)==1, 'Stelle 1 nicht gefunden'
     s=s.replace(a,'&& !NativeAudio.streamUa.isEmpty() && !isMuxedItag(u.getQueryParameter("itag")) && (ref == null')
     i=s.rstrip().rfind('}')
     s=s[:i]+'''
@@ -27,7 +24,7 @@ if 'isMuxedItag' not in s:
 if 'selfTest(' not in s:
     k='        web.loadUrl(last);\n'
     assert s.count(k)==1, 'Stelle 2 nicht gefunden'
-    s=s.replace(k,'        if (getIntent() != null && getIntent().getStringExtra("testurl") != null) { NativeAudio.testUrl = getIntent().getStringExtra("testurl"); web.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW); }\n'+k+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
+    s=s.replace(k,'        if (getIntent() != null && getIntent().getStringExtra("testurl") != null) NativeAudio.testUrl = getIntent().getStringExtra("testurl");\n'+k+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
     i=s.rstrip().rfind('}')
     s=s[:i]+'''
     private void jsLog(final String tag, final String js) {
@@ -59,12 +56,23 @@ if 'testUrl' not in n:
     n=n.replace(k,'    static volatile String testUrl = null;\n\n'+k+'            if (testUrl != null) { out.put("ok", true); out.put("url", testUrl); out.put("client", "TEST (nur Bild+Ton in einer Datei)"); streamUa = "BraveTube-Test"; return out; }\n')
     wr(p,n)
 
-# Unverschluesselter Verkehr nur zum Emulator-Host 10.0.2.2 erlauben
-mf='android/app/src/main/AndroidManifest.xml'
-m=rd(mf)
-if 'networkSecurityConfig' not in m:
-    assert m.count('<application')==1, 'Manifest: application nicht eindeutig'
-    wr(mf,m.replace('<application','<application android:networkSecurityConfig="@xml/bt_netsec"',1))
-    os.makedirs('android/app/src/main/res/xml',exist_ok=True)
-    wr('android/app/src/main/res/xml/bt_netsec.xml','<?xml version="1.0" encoding="utf-8"?>\n<network-security-config>\n  <domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="false">10.0.2.2</domain></domain-config>\n</network-security-config>\n')
+# StreamProxy: im Testmodus zeigt test.googlevideo.com auf das Testvideo auf der GitHub-Seite
+p=J+'StreamProxy.java'
+n=rd(p)
+if 'testMap(' not in n:
+    for sig in ['static WebResourceResponse fetch(String url, Map<String, String> reqHeaders, String ua) {\n',
+                'private static HttpURLConnection open(String url, String ua, long a, long b) throws IOException {\n',
+                'static WebResourceResponse fetchSingle(String url, Map<String, String> reqHeaders, String ua) {\n']:
+        assert n.count(sig)==1, 'StreamProxy: '+sig[:40]
+        n=n.replace(sig,sig+'        url = testMap(url);\n')
+    k='    static volatile String last = "noch nichts geladen";\n'
+    assert n.count(k)==1, 'StreamProxy: last nicht gefunden'
+    n=n.replace(k,k+'''
+    static String testMap(String url) {
+        if (NativeAudio.testUrl != null && url != null && url.startsWith("https://test.googlevideo.com/"))
+            return "https://foxysoxy-tech.github.io/bt-test/test.mp4";
+        return url;
+    }
+''')
+    wr(p,n)
 print('gepatcht')
