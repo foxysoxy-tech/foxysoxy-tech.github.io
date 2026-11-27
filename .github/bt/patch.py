@@ -41,7 +41,7 @@ if 'selfTest(' not in s:
         ui.postDelayed(() -> jsLog("t2", probe), 60000);
         ui.postDelayed(() -> jsLog("seek2", seek10), 61000);
         ui.postDelayed(() -> jsLog("t3", probe), 70000);
-        ui.postDelayed(() -> jsLog("proxy", "(function(){return 'ende'})()"), 71000);
+        ui.postDelayed(() -> android.util.Log.i("BTTEST", "proxy: " + android.text.TextUtils.htmlEncode(StreamProxy.last) + " n=" + StreamProxy.count), 71000);
     }
 }
 '''
