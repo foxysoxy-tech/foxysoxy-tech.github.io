@@ -1336,25 +1336,31 @@ jobs:
                               "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
               };
 
-              /** Prüft, ob die Datei auch weit hinten abrufbar ist (manche Clients werden nach ca. 1 Minute mit 403 gesperrt). Bei Netzfehlern: im Zweifel ja. */
+              /** Prüft an drei Stellen (30, 60, 95 %), ob die Datei auch weit hinten abrufbar ist (YouTube sperrt sonst mit 403). Bei Netzfehlern: im Zweifel ja. */
               static boolean opensFar(String url, String ua, long len) {
                   if (url == null || url.isEmpty()) return true;
-                  if (len <= 0) len = 8000000L;
-                  long off = len * 6 / 10;
-                  HttpURLConnection h = null;
-                  try {
-                      h = (HttpURLConnection) new URL(url).openConnection();
-                      h.setConnectTimeout(8000);
-                      h.setReadTimeout(8000);
-                      h.setRequestProperty("User-Agent", ua);
-                      h.setRequestProperty("Range", "bytes=" + off + "-" + (off + 1023));
-                      int code = h.getResponseCode();
-                      return code != 403 && code != 410;
-                  } catch (Exception e) {
-                      return true;
-                  } finally {
-                      try { if (h != null) h.disconnect(); } catch (Exception ignored) { }
+                  if (len <= 0) {
+                      try { len = Long.parseLong(android.net.Uri.parse(url).getQueryParameter("clen")); } catch (Exception e) { len = 8000000L; }
                   }
+                  int[] pc = {30, 60, 95};
+                  for (int p : pc) {
+                      long off = len * p / 100;
+                      HttpURLConnection h = null;
+                      try {
+                          h = (HttpURLConnection) new URL(url).openConnection();
+                          h.setConnectTimeout(8000);
+                          h.setReadTimeout(8000);
+                          h.setRequestProperty("User-Agent", ua);
+                          h.setRequestProperty("Range", "bytes=" + off + "-" + (off + 1023));
+                          int code = h.getResponseCode();
+                          if (code == 403 || code == 410) return false;
+                      } catch (Exception e) {
+                          // Netzfehler: nicht als Sperre werten
+                      } finally {
+                          try { if (h != null) h.disconnect(); } catch (Exception ignored) { }
+                      }
+                  }
+                  return true;
               }
 
               /** User-Agent des Clients, der die zuletzt gelieferte Stream-Adresse ausgestellt hat (für den Proxy im WebView). */
@@ -1375,27 +1381,30 @@ jobs:
                               String url = pickMuxed(raw);
                               JSONObject ad = pickAdaptive(raw);
                               if (url != null || ad != null) {
-                                  long len = ad != null ? ad.getJSONObject("v").optLong("len", 0) : 0;
-                                  if (!opensFar(ad != null ? ad.getJSONObject("v").optString("url", "") : url, c[3], len)) {
-                                      last = c[0] + " " + c[1] + ": gesperrt (403 weiter hinten)";
-                                      if (fb == null) {
-                                          fb = new org.json.JSONObject();
-                                          fb.put("ok", true);
-                                          if (url != null) fb.put("url", url);
-                                          if (ad != null) fb.put("ad", ad);
-                                          fb.put("client", c[0]);
-                                          fbUa = c[3];
-                                      }
-                                      if (all.length() > 0) all.append(" | ");
-                                      all.append(last);
-                                      continue;
+                                  boolean adOk = ad != null
+                                          && opensFar(ad.getJSONObject("v").optString("url", ""), c[3], ad.getJSONObject("v").optLong("len", 0))
+                                          && opensFar(ad.getJSONObject("a").optString("url", ""), c[3], ad.getJSONObject("a").optLong("len", 0));
+                                  boolean muxOk = !adOk && url != null && opensFar(url, c[3], 0);
+                                  if (adOk || muxOk) {
+                                      streamUa = c[3];
+                                      out.put("ok", true);
+                                      if (url != null) out.put("url", url);
+                                      if (adOk) out.put("ad", ad);
+                                      out.put("client", c[0] + (adOk ? "" : " (nur Bild+Ton in einer Datei)"));
+                                      return out;
                                   }
-                                  streamUa = c[3];
-                                  out.put("ok", true);
-                                  if (url != null) out.put("url", url);
-                                  if (ad != null) out.put("ad", ad);
-                                  out.put("client", c[0]);
-                                  return out;
+                                  last = c[0] + " " + c[1] + ": gesperrt (403 weiter hinten)";
+                                  if (fb == null) {
+                                      fb = new org.json.JSONObject();
+                                      fb.put("ok", true);
+                                      if (url != null) fb.put("url", url);
+                                      if (ad != null) fb.put("ad", ad);
+                                      fb.put("client", c[0]);
+                                      fbUa = c[3];
+                                  }
+                                  if (all.length() > 0) all.append(" | ");
+                                  all.append(last);
+                                  continue;
                               }
                               last = c[0] + " " + c[1] + ": " + status(raw);
                           } catch (Exception e) {
@@ -2069,7 +2078,147 @@ jobs:
 
               private static final Pattern RANGE = Pattern.compile("bytes=(\\d*)-(\\d*)");
 
+              private static final long CHUNK = 2L * 1024 * 1024;
+
+              /** Lädt in einzelnen 2-MB-Anfragen (wie yt-dlp): lange Verbindungen bricht YouTube nach einer Weile ab ("Stream hängt"). */
               static WebResourceResponse fetch(String url, Map<String, String> reqHeaders, String ua) {
+                  String range = null;
+                  if (reqHeaders != null) {
+                      for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
+                          if ("range".equalsIgnoreCase(e.getKey())) range = e.getValue();
+                      }
+                  }
+                  long start = 0, end = -1;
+                  boolean suffix = false;
+                  if (range != null) {
+                      Matcher m = RANGE.matcher(range);
+                      if (m.find()) {
+                          suffix = m.group(1).isEmpty();
+                          try { if (!m.group(1).isEmpty()) start = Long.parseLong(m.group(1)); } catch (Exception ignored) { }
+                          try { if (!m.group(2).isEmpty()) end = Long.parseLong(m.group(2)); } catch (Exception ignored) { }
+                      }
+                  }
+                  if (suffix) return fetchSingle(url, reqHeaders, ua);
+                  final int myCount = ++count;
+                  final String tag = "#" + myCount + " " + (range == null ? "ohne Range" : range) + " (Blöcke)";
+                  HttpURLConnection c = null;
+                  try {
+                      long firstEnd = end >= 0 ? Math.min(end, start + CHUNK - 1) : start + CHUNK - 1;
+                      c = open(url, ua, start, firstEnd);
+                      int code = c.getResponseCode();
+                      String cr = c.getHeaderField("Content-Range");
+                      long total = -1;
+                      if (code == 206 && cr != null) {
+                          int sl = cr.lastIndexOf('/');
+                          if (sl > 0) { try { total = Long.parseLong(cr.substring(sl + 1).trim()); } catch (Exception ignored) { } }
+                      }
+                      if (code != 206 || total <= 0) {
+                          last = tag + " -> HTTP " + code + (total <= 0 && code == 206 ? " ohne Gesamtgröße" : "") + ", weiter ohne Blöcke";
+                          c.disconnect();
+                          count--;
+                          return fetchSingle(url, reqHeaders, ua);
+                      }
+                      final long realEnd = end >= 0 ? Math.min(end, total - 1) : total - 1;
+                      if (start > realEnd) { last = tag + " -> Bereich ungültig"; c.disconnect(); return null; }
+                      final long len = realEnd - start + 1;
+                      String type = c.getContentType();
+                      if (type == null) type = "video/mp4";
+                      int semi = type.indexOf(';');
+                      String mime = semi > 0 ? type.substring(0, semi).trim() : type;
+                      final boolean partial = range != null;
+                      Map<String, String> h = new HashMap<>();
+                      h.put("Content-Length", String.valueOf(len));
+                      if (partial) h.put("Content-Range", "bytes " + start + "-" + realEnd + "/" + total);
+                      h.put("Accept-Ranges", "bytes");
+                      h.put("Access-Control-Allow-Origin", "*");
+                      last = tag + " -> " + (partial ? 206 : 200) + " " + start + "-" + realEnd + "/" + total + " Länge " + len;
+                      final String fUrl = url, fUa = ua;
+                      final long fStart = start;
+                      final HttpURLConnection firstConn = c;
+                      InputStream in = new InputStream() {
+                          HttpURLConnection conn = firstConn;
+                          InputStream cur = null;
+                          long pos = fStart;          // nächstes Byte, das noch geliefert werden muss
+                          long chunkEnd = firstEnd2(fStart, realEnd);
+                          int blocks = 1;
+                          boolean closed = false;
+                          private long firstEnd2(long s, long re) { return Math.min(re, s + CHUNK - 1); }
+                          private boolean ensure() throws IOException {
+                              if (closed || pos > realEnd) return false;
+                              if (cur != null) return true;
+                              if (conn == null) {
+                                  IOException err = null;
+                                  for (int tries = 0; tries < 3; tries++) {
+                                      try {
+                                          HttpURLConnection n = open(fUrl, fUa, pos, Math.min(realEnd, pos + CHUNK - 1));
+                                          int cd = n.getResponseCode();
+                                          if (cd != 206) { n.disconnect(); throw new IOException("HTTP " + cd + " bei Byte " + pos); }
+                                          conn = n;
+                                          chunkEnd = Math.min(realEnd, pos + CHUNK - 1);
+                                          blocks++;
+                                          err = null;
+                                          break;
+                                      } catch (IOException e) {
+                                          err = e;
+                                          try { Thread.sleep(300); } catch (InterruptedException ignored) { }
+                                      }
+                                  }
+                                  if (err != null) { last = tag + " -> Block ab " + pos + " fehlgeschlagen: " + err.getMessage(); throw err; }
+                              }
+                              cur = conn.getInputStream();
+                              return true;
+                          }
+                          private void endChunk() {
+                              try { if (cur != null) cur.close(); } catch (Exception ignored) { }
+                              try { if (conn != null) conn.disconnect(); } catch (Exception ignored) { }
+                              cur = null; conn = null;
+                          }
+                          @Override public int read() throws IOException {
+                              byte[] b = new byte[1];
+                              int r = read(b, 0, 1);
+                              return r < 0 ? -1 : (b[0] & 0xff);
+                          }
+                          @Override public int read(byte[] buf, int off, int n) throws IOException {
+                              if (n <= 0) return 0;
+                              while (true) {
+                                  if (!ensure()) return -1;
+                                  int r = cur.read(buf, off, (int) Math.min((long) n, realEnd - pos + 1));
+                                  if (r == 0) {
+                                      int one = cur.read();
+                                      if (one < 0) r = -1; else { buf[off] = (byte) one; r = 1; }
+                                  }
+                                  if (r > 0) { pos += r; if (pos > chunkEnd) endChunk(); return r; }
+                                  if (r < 0) { endChunk(); if (pos > realEnd) return -1; }
+                              }
+                          }
+                          @Override public void close() throws IOException {
+                              closed = true;
+                              endChunk();
+                              last = tag + " -> geschlossen bei " + pos + " (" + blocks + " Blöcke)";
+                          }
+                      };
+                      return new WebResourceResponse(mime, null, partial ? 206 : 200, partial ? "Partial Content" : "OK", h, in);
+                  } catch (Exception e) {
+                      last = tag + " -> Fehler " + e.getClass().getSimpleName() + " " + e.getMessage();
+                      try { if (c != null) c.disconnect(); } catch (Exception ignored) { }
+                      return null;
+                  }
+              }
+
+              private static HttpURLConnection open(String url, String ua, long a, long b) throws IOException {
+                  HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                  c.setRequestMethod("GET");
+                  c.setConnectTimeout(12000);
+                  c.setReadTimeout(20000);
+                  c.setInstanceFollowRedirects(true);
+                  c.setRequestProperty("User-Agent", ua);
+                  c.setRequestProperty("Accept-Encoding", "identity");
+                  c.setRequestProperty("Range", "bytes=" + a + "-" + b);
+                  return c;
+              }
+
+              /** Alter Weg: eine einzige Anfrage (für Suffix-Bereiche und Server, die keine Blöcke liefern). */
+              static WebResourceResponse fetchSingle(String url, Map<String, String> reqHeaders, String ua) {
                   String range = null;
                   if (reqHeaders != null) {
                       for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
