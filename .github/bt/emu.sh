@@ -3,8 +3,12 @@ A="timeout 60 adb"
 $A install -r BraveTube.apk
 $A logcat -c
 $A shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic --es testurl 'https://foxysoxy-tech.github.io/bt-test/test.mp4?itag=18'
-sleep 120
-timeout 90 adb logcat -b all -d -v brief > alllog1.txt
+for i in 1 2 3 4 5 6 7 8; do
+  sleep 15
+  timeout 25 adb logcat -b all -d -v brief > tmp1.txt 2>/dev/null
+  [ -s tmp1.txt ] && cp tmp1.txt alllog1.txt
+  echo "Lauf $i: $(wc -l < tmp1.txt) Zeilen, Geraet: $(timeout 10 adb get-state 2>&1 | head -1)"
+done
 grep BTTEST alllog1.txt > bttest.log
 echo "Phase 1 fertig: $(wc -l < alllog1.txt) Zeilen"
 timeout 30 adb shell am force-stop com.foxysoxy.bravetube
