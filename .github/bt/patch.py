@@ -1,13 +1,20 @@
-import re,sys
-p='android/app/src/main/java/com/foxysoxy/bravetube/MainActivity.java'
-s=open(p,encoding='utf-8').read()
+import os,re,sys
+J='android/app/src/main/java/com/foxysoxy/bravetube/'
+def rd(p): return open(p,encoding='utf-8').read()
+def wr(p,s): open(p,'w',encoding='utf-8').write(s)
 
-# 1) Dateien mit Bild+Ton in einer Datei (itag 18, 22 ...) laden ohne Proxy direkt
-a='&& !NativeAudio.streamUa.isEmpty() && (ref == null'
-b='&& !NativeAudio.streamUa.isEmpty() && !isMuxedItag(u.getQueryParameter("itag")) && (ref == null'
+# MainActivity
+p=J+'MainActivity.java'
+s=rd(p)
+
+# 1) Dateien mit Bild+Ton in einer Datei (itag 18, 22 ...) laden ohne Proxy direkt; Testhost 10.0.2.2 wie googlevideo behandeln
 if 'isMuxedItag' not in s:
-    assert s.count(a)==1, 'Stelle 1 nicht gefunden'
-    s=s.replace(a,b)
+    a='h.endsWith(".googlevideo.com") && "GET".equals'
+    assert s.count(a)==1, 'Stelle 1a nicht gefunden'
+    s=s.replace(a,'(h.endsWith(".googlevideo.com") || (NativeAudio.testUrl != null && "10.0.2.2".equals(h))) && "GET".equals')
+    a='&& !NativeAudio.streamUa.isEmpty() && (ref == null'
+    assert s.count(a)==1, 'Stelle 1b nicht gefunden'
+    s=s.replace(a,'&& !NativeAudio.streamUa.isEmpty() && !isMuxedItag(u.getQueryParameter("itag")) && (ref == null')
     i=s.rstrip().rfind('}')
     s=s[:i]+'''
     static boolean isMuxedItag(String t) {
@@ -16,11 +23,11 @@ if 'isMuxedItag' not in s:
 }
 '''
 
-# 2) Selbsttest: nur mit Intent-Extra "selftest" (Emulator), sonst ohne Wirkung
+# 2) Selbsttest (nur mit Intent-Extra "selftest", sonst ohne Wirkung)
 if 'selfTest(' not in s:
     k='        web.loadUrl(last);\n'
     assert s.count(k)==1, 'Stelle 2 nicht gefunden'
-    s=s.replace(k,k+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
+    s=s.replace(k,'        if (getIntent() != null && getIntent().getStringExtra("testurl") != null) NativeAudio.testUrl = getIntent().getStringExtra("testurl");\n'+k+'        if (getIntent() != null && getIntent().getStringExtra("selftest") != null) selfTest(getIntent().getStringExtra("selftest"));\n')
     i=s.rstrip().rfind('}')
     s=s[:i]+'''
     private void jsLog(final String tag, final String js) {
@@ -32,14 +39,32 @@ if 'selfTest(' not in s:
         final String seek60 = "(function(){var v=document.getElementById('ownV');if(v&&v.duration>0){v.currentTime=v.duration*0.6}return 'seek60'})()";
         final String seek10 = "(function(){var v=document.getElementById('ownV');if(v&&v.duration>0){v.currentTime=v.duration*0.1}return 'seek10'})()";
         ui.postDelayed(() -> jsLog("start", "(function(){try{play({id:'" + id + "',title:'selftest'});return 'play ok'}catch(e){return 'play fehler '+e}})()"), 30000);
-        ui.postDelayed(() -> jsLog("t1", probe), 55000);
-        ui.postDelayed(() -> jsLog("seek1", seek60), 56000);
-        ui.postDelayed(() -> jsLog("t2", probe), 66000);
-        ui.postDelayed(() -> jsLog("seek2", seek10), 67000);
-        ui.postDelayed(() -> jsLog("t3", probe), 77000);
-        ui.postDelayed(() -> android.util.Log.i("BTTEST", "ende"), 78000);
+        ui.postDelayed(() -> jsLog("t1", probe), 50000);
+        ui.postDelayed(() -> jsLog("seek1", seek60), 51000);
+        ui.postDelayed(() -> jsLog("t2", probe), 60000);
+        ui.postDelayed(() -> jsLog("seek2", seek10), 61000);
+        ui.postDelayed(() -> jsLog("t3", probe), 70000);
+        ui.postDelayed(() -> jsLog("proxy", "(function(){return 'ende'})()"), 71000);
     }
 }
 '''
-open(p,'w',encoding='utf-8').write(s)
-print('MainActivity gepatcht')
+wr(p,s)
+
+# NativeAudio: Testadresse statt YouTube (nur gesetzt, wenn der Selbsttest sie per Intent mitgibt)
+p=J+'NativeAudio.java'
+n=rd(p)
+if 'testUrl' not in n:
+    k='    static org.json.JSONObject streamJson(String videoId) {\n        org.json.JSONObject out = new org.json.JSONObject();\n        try {\n'
+    assert n.count(k)==1, 'Stelle 3 nicht gefunden'
+    n=n.replace(k,'    static volatile String testUrl = null;\n\n'+k+'            if (testUrl != null) { out.put("ok", true); out.put("url", testUrl); out.put("client", "TEST (nur Bild+Ton in einer Datei)"); streamUa = "BraveTube-Test"; return out; }\n')
+    wr(p,n)
+
+# Unverschluesselter Verkehr nur zum Emulator-Host 10.0.2.2 erlauben
+mf='android/app/src/main/AndroidManifest.xml'
+m=rd(mf)
+if 'networkSecurityConfig' not in m:
+    assert m.count('<application')==1, 'Manifest: application nicht eindeutig'
+    wr(mf,m.replace('<application','<application android:networkSecurityConfig="@xml/bt_netsec"',1))
+    os.makedirs('android/app/src/main/res/xml',exist_ok=True)
+    wr('android/app/src/main/res/xml/bt_netsec.xml','<?xml version="1.0" encoding="utf-8"?>\n<network-security-config>\n  <domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="false">10.0.2.2</domain></domain-config>\n</network-security-config>\n')
+print('gepatcht')
