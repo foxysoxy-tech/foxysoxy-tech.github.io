@@ -1,9 +1,11 @@
 import json,re,sys,os
 raw=open('bttest.log',encoding='utf-8',errors='replace').read()
+try: raw2=open('bttest2.log',encoding='utf-8',errors='replace').read()
+except Exception: raw2=''
 try: allog=open('alllog.txt',encoding='utf-8',errors='replace').read()
 except Exception: allog=''
-def get(tag):
-    m=re.findall(r'BTTEST\s*\(\s*\d+\):\s*'+tag+r':\s*(.*)',raw)
+def get(tag,src=None):
+    m=re.findall(r'BTTEST\s*\(\s*\d+\):\s*'+tag+r':\s*(.*)',raw if src is None else src)
     if not m: return None
     v=m[-1].strip()
     try:
@@ -23,6 +25,9 @@ def need(c,msg):
 need(isinstance(t1,dict) and (t1.get('t') or 0)>2 and not t1.get('p') and not t1.get('e'),'Video startet und laeuft')
 need(isinstance(t2,dict) and t2.get('d') and t2['t']>=t2['d']*0.55 and t2['rs']>=3 and not t2.get('e'),'Vorspulen funktioniert')
 need(isinstance(t3,dict) and t3.get('d') and t3['d']*0.08<=t3['t']<=t3['d']*0.1+30 and t3['rs']>=3 and not t3.get('e'),'Zurueckspulen funktioniert')
+u1,u2,u3=get('t1',raw2),get('t2',raw2),get('t3',raw2)
+out.append('')
+out.append('Zusatz (Proxy-Pfad, nur zur Information): t1=%s t2=%s t3=%s'%(u1,u2,u3))
 out.append('')
 out.append('--- App/WebView-Meldungen (letzte) ---')
 keep=[l for l in allog.splitlines() if re.search(r'chromium|BraveTube|BTTEST|AndroidRuntime|FATAL|cr_Media|Console',l)]
