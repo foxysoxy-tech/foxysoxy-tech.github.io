@@ -16,7 +16,7 @@ echo "Phase 1 fertig: $(wc -l < alllog1.txt) Zeilen"
 timeout 30 adb shell am force-stop com.foxysoxy.bravetube
 sleep 3
 timeout 30 adb logcat -c
-timeout 30 adb shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic --es testurl 'https://test.googlevideo.com/videoplayback?itag=99'
+timeout 30 adb shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic --es testurl AD
 sleep 85
 timeout 90 adb logcat -d -v brief > alllog2.txt
 grep BTTEST alllog2.txt > bttest2.log
