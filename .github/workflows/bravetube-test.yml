@@ -69,6 +69,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: apk
+      - name: Test-Server starten (verhält sich wie der YouTube-Videoserver)
+        run: |
+          sudo apt-get install -y ffmpeg > /dev/null
+          nohup python3 .github/bt/mock.py > mock.out 2>&1 &
+          for i in $(seq 1 90); do curl -s -o /dev/null http://127.0.0.1:8099/x && break; sleep 2; done
+          head -3 mock.out
       - name: KVM freischalten
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -85,19 +91,28 @@ jobs:
           script: |
             adb install -r BraveTube.apk
             adb logcat -c
-            adb shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic
-            sleep 100
+            adb shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic --es testurl 'http://10.0.2.2:8099/videoplayback?itag=18'
+            sleep 85
             adb logcat -d -s BTTEST:I -v brief > bttest.log
+            adb shell am force-stop com.foxysoxy.bravetube
+            adb logcat -c
+            adb shell am start -n com.foxysoxy.bravetube/.MainActivity --es selftest p3ug4IRm_ic --es testurl 'http://10.0.2.2:8099/videoplayback?itag=99'
+            sleep 85
+            adb logcat -d -s BTTEST:I -v brief > bttest2.log
             adb logcat -d -v brief > alllog.txt
       - name: Ergebnis auswerten
-        run: python3 .github/bt/check.py
+        run: |
+          echo "--- Test-Server ---" ; tail -40 mock.out
+          python3 .github/bt/check.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: emulator-log
           path: |
             bttest.log
+            bttest2.log
             alllog.txt
+            mock.out
 
   veroeffentlichen:
     needs: emulator
