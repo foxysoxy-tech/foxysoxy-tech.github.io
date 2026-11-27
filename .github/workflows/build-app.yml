@@ -2125,13 +2125,13 @@ jobs:
                       if (type == null) type = "video/mp4";
                       int semi = type.indexOf(';');
                       String mime = semi > 0 ? type.substring(0, semi).trim() : type;
-                      final boolean partial = range != null;
+                      // Der WebView behandelt den Strom als ganze Datei und wendet "Range" selbst an (überspringt den Anfang selbst).
+                      // Darum: Antwort 200 mit Gesamtgröße, davor "start" unsichtbare Bytes, die der WebView mit skip() überspringt.
                       Map<String, String> h = new HashMap<>();
-                      h.put("Content-Length", String.valueOf(len));
-                      if (partial) h.put("Content-Range", "bytes " + start + "-" + realEnd + "/" + total);
+                      h.put("Content-Length", String.valueOf(total));
                       h.put("Accept-Ranges", "bytes");
                       h.put("Access-Control-Allow-Origin", "*");
-                      last = tag + " -> " + (partial ? 206 : 200) + " " + start + "-" + realEnd + "/" + total + " Länge " + len;
+                      last = tag + " -> Blöcke " + start + "-" + realEnd + "/" + total + " Länge " + len;
                       final String fUrl = url, fUa = ua;
                       final long fStart = start;
                       final HttpURLConnection firstConn = c;
@@ -2197,12 +2197,44 @@ jobs:
                               last = tag + " -> geschlossen bei " + pos + " (" + blocks + " Blöcke)";
                           }
                       };
-                      return new WebResourceResponse(mime, null, partial ? 206 : 200, partial ? "Partial Content" : "OK", h, in);
+                      return new WebResourceResponse(mime, null, 200, "OK", h, new SkipPrefix(start, in));
                   } catch (Exception e) {
                       last = tag + " -> Fehler " + e.getClass().getSimpleName() + " " + e.getMessage();
                       try { if (c != null) c.disconnect(); } catch (Exception ignored) { }
                       return null;
                   }
+              }
+
+              /** Strom, der vorne "n" unsichtbare Bytes hat (skip() ist sofort fertig), danach die echten Daten. */
+              private static final class SkipPrefix extends InputStream {
+                  private long prefix;
+                  private final InputStream in;
+                  SkipPrefix(long prefix, InputStream in) { this.prefix = prefix; this.in = in; }
+                  @Override public int read() throws IOException {
+                      if (prefix > 0) { prefix--; return 0; }
+                      return in.read();
+                  }
+                  @Override public int read(byte[] b, int off, int n) throws IOException {
+                      if (n <= 0) return 0;
+                      if (prefix > 0) {
+                          int k = (int) Math.min((long) n, prefix);
+                          java.util.Arrays.fill(b, off, off + k, (byte) 0);
+                          prefix -= k;
+                          return k;
+                      }
+                      return in.read(b, off, n);
+                  }
+                  @Override public long skip(long n) throws IOException {
+                      if (n <= 0) return 0;
+                      if (prefix > 0) {
+                          long k = Math.min(n, prefix);
+                          prefix -= k;
+                          return k;
+                      }
+                      return in.skip(n);
+                  }
+                  @Override public int available() throws IOException { return prefix > 0 ? (int) Math.min(prefix, 65536) : in.available(); }
+                  @Override public void close() throws IOException { in.close(); }
               }
 
               private static HttpURLConnection open(String url, String ua, long a, long b) throws IOException {
