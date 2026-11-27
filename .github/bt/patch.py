@@ -53,7 +53,7 @@ n=rd(p)
 if 'testUrl' not in n:
     k='    static org.json.JSONObject streamJson(String videoId) {\n        org.json.JSONObject out = new org.json.JSONObject();\n        try {\n'
     assert n.count(k)==1, 'Stelle 3 nicht gefunden'
-    n=n.replace(k,'    static volatile String testUrl = null;\n\n'+k+'            if (testUrl != null) { out.put("ok", true); out.put("url", testUrl); out.put("client", "TEST (nur Bild+Ton in einer Datei)"); streamUa = "BraveTube-Test"; return out; }\n')
+    n=n.replace(k,'    static volatile String testUrl = null;\n\n'+k+'            if ("AD".equals(testUrl)) { java.net.HttpURLConnection hc = (java.net.HttpURLConnection) new java.net.URL("https://foxysoxy-tech.github.io/bt-test/ad.json").openConnection(); java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream(); java.io.InputStream is = hc.getInputStream(); byte[] bf = new byte[8192]; int rn; while ((rn = is.read(bf)) > 0) bo.write(bf, 0, rn); is.close(); String js = bo.toString("UTF-8").replace("itag=137", "itag=137&pot=t").replace("itag=140", "itag=140&pot=t"); out.put("ok", true); out.put("ad", new org.json.JSONObject(js)); out.put("client", "TEST (getrennte Spuren)"); streamUa = "BraveTube-Test"; return out; }\n            if (testUrl != null) { out.put("ok", true); out.put("url", testUrl); out.put("client", "TEST (nur Bild+Ton in einer Datei)"); streamUa = "BraveTube-Test"; return out; }\n')
     wr(p,n)
 
 # StreamProxy: im Testmodus zeigt test.googlevideo.com auf das Testvideo auf der GitHub-Seite
@@ -70,9 +70,17 @@ if 'testMap(' not in n:
     n=n.replace(k,k+'''
     static String testMap(String url) {
         if (NativeAudio.testUrl != null && url != null && url.startsWith("https://test.googlevideo.com/"))
-            return "https://foxysoxy-tech.github.io/bt-test/test.mp4";
+            return url.contains("/bt-v") ? "https://foxysoxy-tech.github.io/bt-test/v.mp4" : url.contains("/bt-a") ? "https://foxysoxy-tech.github.io/bt-test/a.mp4" : "https://foxysoxy-tech.github.io/bt-test/test.mp4";
         return url;
     }
 ''')
+    wr(p,n)
+# YtFetcher.rangeFetch: Testadresse umbiegen
+p=J+'YtFetcher.java'
+n=rd(p)
+if 'testMap(' not in n:
+    k='            c = (HttpURLConnection) new URL(url).openConnection();\n            c.setRequestMethod("GET");\n            c.setConnectTimeout(12000);\n'
+    assert n.count(k)==1, 'YtFetcher: Stelle nicht gefunden'
+    n=n.replace(k,'            url = StreamProxy.testMap(url);\n'+k)
     wr(p,n)
 print('gepatcht')
