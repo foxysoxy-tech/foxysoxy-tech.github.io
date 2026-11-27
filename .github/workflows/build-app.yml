@@ -1315,19 +1315,47 @@ jobs:
 
               static final String[][] CLIENTS = {
                       // name, version, id, user agent, extra JSON für den Client
-                      {"ANDROID_VR", "1.65.10", "28",
-                              "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-                              "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
+                      // Reihenfolge nach Diagnose 4: ANDROID, IOS und VISIONOS liefern die ganze Datei, ANDROID_VR wird nach ca. 1 Minute gesperrt (403)
                       {"ANDROID", "20.10.38", "3",
                               "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
                               "{\"osName\":\"Android\",\"osVersion\":\"11\"}"},
-                      {"ANDROID_VR", "1.60.19", "28",
-                              "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                      {"IOS", "20.10.4", "5",
+                              "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                              "{\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\"}"},
+                      {"VISIONOS", "0.1", "101",
+                              "com.google.ios.youtube/0.1 (RealityDevice14,1; U; CPU iOS 18_3_2 like Mac OS X;)",
+                              "{\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice14,1\",\"osName\":\"visionOS\",\"osVersion\":\"1.3.21O771\"}"},
+                      {"ANDROID_VR", "1.65.10", "28",
+                              "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                               "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
                       {"ANDROID", "19.44.38", "3",
                               "com.google.android.youtube/19.44.38 (Linux; U; Android 11) gzip",
                               "{\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\"}"},
+                      {"ANDROID_VR", "1.60.19", "28",
+                              "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                              "{\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\"}"},
               };
+
+              /** Prüft, ob die Datei auch weit hinten abrufbar ist (manche Clients werden nach ca. 1 Minute mit 403 gesperrt). Bei Netzfehlern: im Zweifel ja. */
+              static boolean opensFar(String url, String ua, long len) {
+                  if (url == null || url.isEmpty()) return true;
+                  if (len <= 0) len = 8000000L;
+                  long off = len * 6 / 10;
+                  HttpURLConnection h = null;
+                  try {
+                      h = (HttpURLConnection) new URL(url).openConnection();
+                      h.setConnectTimeout(8000);
+                      h.setReadTimeout(8000);
+                      h.setRequestProperty("User-Agent", ua);
+                      h.setRequestProperty("Range", "bytes=" + off + "-" + (off + 1023));
+                      int code = h.getResponseCode();
+                      return code != 403 && code != 410;
+                  } catch (Exception e) {
+                      return true;
+                  } finally {
+                      try { if (h != null) h.disconnect(); } catch (Exception ignored) { }
+                  }
+              }
 
               /** User-Agent des Clients, der die zuletzt gelieferte Stream-Adresse ausgestellt hat (für den Proxy im WebView). */
               static volatile String streamUa = "";
@@ -1338,6 +1366,8 @@ jobs:
                   try {
                       if (videoId == null || !videoId.matches("^[A-Za-z0-9_-]{11}$")) { out.put("error", "Ungültiges Video"); return out; }
                       StringBuilder all = new StringBuilder();
+                      org.json.JSONObject fb = null;
+                      String fbUa = "";
                       for (String[] c : CLIENTS) {
                           String last;
                           try {
@@ -1345,6 +1375,21 @@ jobs:
                               String url = pickMuxed(raw);
                               JSONObject ad = pickAdaptive(raw);
                               if (url != null || ad != null) {
+                                  long len = ad != null ? ad.getJSONObject("v").optLong("len", 0) : 0;
+                                  if (!opensFar(ad != null ? ad.getJSONObject("v").optString("url", "") : url, c[3], len)) {
+                                      last = c[0] + " " + c[1] + ": gesperrt (403 weiter hinten)";
+                                      if (fb == null) {
+                                          fb = new org.json.JSONObject();
+                                          fb.put("ok", true);
+                                          if (url != null) fb.put("url", url);
+                                          if (ad != null) fb.put("ad", ad);
+                                          fb.put("client", c[0]);
+                                          fbUa = c[3];
+                                      }
+                                      if (all.length() > 0) all.append(" | ");
+                                      all.append(last);
+                                      continue;
+                                  }
                                   streamUa = c[3];
                                   out.put("ok", true);
                                   if (url != null) out.put("url", url);
@@ -1359,6 +1404,7 @@ jobs:
                           if (all.length() > 0) all.append(" | ");
                           all.append(last);
                       }
+                      if (fb != null) { streamUa = fbUa; return fb; }
                       out.put("error", all.length() == 0 ? "keine Antwort" : all.toString());
                   } catch (Exception e) {
                       try { out.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { }
