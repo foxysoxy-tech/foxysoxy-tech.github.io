@@ -24,7 +24,7 @@ def need(c,msg):
     if not c: ok=False
 need(isinstance(t1,dict) and (t1.get('t') or 0)>2 and (t1.get('vw') or 0)>0 and not t1.get('p') and not t1.get('e'),'Video startet und laeuft')
 need(isinstance(t2,dict) and t2.get('d') and t2['t']>=t2['d']*0.55 and t2['rs']>=3 and t2.get('vw',0)>0 and not t2.get('sk') and t2['t']-(t1 or {}).get('t',0)>=20 and not t2.get('e'),'Vorspulen funktioniert')
-need(isinstance(t3,dict) and t3.get('d') and t3['d']*0.08<=t3['t']<=t3['d']*0.1+15 and t3['rs']>=3 and t3.get('vw',0)>0 and not t3.get('sk') and t2['t']-t3['t']>=40 and not t3.get('e'),'Zurueckspulen funktioniert')
+need(isinstance(t3,dict) and t3.get('d') and t3['d']*0.08<=t3['t']<=t3['d']*0.1+15 and t3['rs']>=3 and t3.get('vw',0)>0 and not t3.get('sk') and (t2 or {}).get('t',0)-t3['t']>=40 and not t3.get('e'),'Zurueckspulen funktioniert')
 u1,u2,u3=get('t1',raw2),get('t2',raw2),get('t3',raw2)
 out.append('')
 out.append('Zusatz (Proxy-Pfad, nur zur Information): t1=%s t2=%s t3=%s'%(u1,u2,u3))
@@ -33,8 +33,8 @@ out.append('--- App/WebView-Meldungen (letzte) ---')
 try: a1=open('alllog1.txt',encoding='utf-8',errors='replace').read()
 except Exception: a1=''
 out.append('--- Phase 1 Detail ---')
-k1=[l for l in a1.splitlines() if re.search(r'BTTEST|ANR|anr_|FATAL|AndroidRuntime|died|Choreographer|MediaCodec|cr_Media|MediaPlayer|CONSOLE|BraveTube|lowmemory|lmkd|Killing|Force finishing|am_proc_died|StrictMode',l) and 'VideoCapture' not in l]
-out.append('\n'.join(k1[-70:])[-9000:])
+k1=[l for l in a1.splitlines() if not re.search(r'StrictMode|VideoCapture|MediaPlayerList|Choreographer|ActivityManager.*(PACKAGE|am_pss)|\bat [a-z]',l)]
+out.append('\n'.join(k1[-90:])[-11000:])
 out.append('--- Ende Phase 1 ---')
 keep=[l for l in allog.splitlines() if re.search(r'chromium|BraveTube|BTTEST|AndroidRuntime|FATAL|cr_Media|Console',l)]
 out.append('\n'.join(keep[-60:])[-7000:])
