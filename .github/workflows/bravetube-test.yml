@@ -101,6 +101,7 @@ jobs:
             mock.out
 
   veroeffentlichen:
+    if: false
     needs: emulator
     runs-on: ubuntu-latest
     steps:
